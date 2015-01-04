@@ -17,6 +17,8 @@
 
 #pragma once
 
+#define USE_LED_RING_DEFAULT_CONFIG     // if you want to have the 12 first led with the ring by default
+
 #define MAX_LED_STRIP_LENGTH 32
 
 #define LED_X_BIT_OFFSET 4
@@ -44,7 +46,12 @@ typedef enum {
     LED_FUNCTION_WARNING     = (1 << 7),
     LED_FUNCTION_FLIGHT_MODE = (1 << 8),
     LED_FUNCTION_ARM_STATE   = (1 << 9),
-    LED_FUNCTION_THROTTLE    = (1 << 10)
+    LED_FUNCTION_THROTTLE    = (1 << 10),
+    LED_FUNCTION_THRUST_RING = (1 << 11),
+    LED_RING_COLOR_RED       = (1 << 12),
+    LED_RING_COLOR_BLUE      = (1 << 13),
+    LED_RING_COLOR_GREEN     = (1 << 14),
+    LED_RING_COLOR_WHITE     = (1 << 15),
 } ledFlag_e;
 
 #define LED_DIRECTION_BIT_OFFSET 0
@@ -65,6 +72,7 @@ extern uint8_t ledCount;
 
 bool parseLedStripConfig(uint8_t ledIndex, const char *config);
 void updateLedStrip(void);
+void updateLedRing(void);
 
 void applyDefaultLedStripConfig(ledConfig_t *ledConfig);
 void generateLedConfig(uint8_t ledIndex, char *ledConfigBuffer, size_t bufferSize);
