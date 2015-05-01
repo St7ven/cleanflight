@@ -22,6 +22,7 @@
 #include <math.h>
 
 #include "build_config.h"
+#include "debug.h"
 
 #include "platform.h"
 
@@ -41,26 +42,36 @@
 #include "drivers/timer.h"
 #include "drivers/pwm_rx.h"
 
-#include "flight/flight.h"
-#include "flight/mixer.h"
-#include "flight/failsafe.h"
-#include "flight/navigation.h"
 #include "rx/rx.h"
 #include "rx/msp.h"
+
 #include "io/escservo.h"
 #include "io/rc_controls.h"
 #include "io/gps.h"
 #include "io/gimbal.h"
 #include "io/serial.h"
 #include "io/ledstrip.h"
+#include "io/flashfs.h"
+
 #include "telemetry/telemetry.h"
+
 #include "sensors/boardalignment.h"
 #include "sensors/sensors.h"
 #include "sensors/battery.h"
+#include "sensors/sonar.h"
 #include "sensors/acceleration.h"
 #include "sensors/barometer.h"
 #include "sensors/compass.h"
 #include "sensors/gyro.h"
+
+#include "flight/mixer.h"
+#include "flight/pid.h"
+#include "flight/imu.h"
+#include "flight/failsafe.h"
+#include "flight/navigation.h"
+#include "flight/altitudehold.h"
+
+#include "mw.h"
 
 #include "config/runtime_config.h"
 #include "config/config.h"
@@ -78,7 +89,6 @@ static serialPort_t *mspSerialPort;
 
 extern uint16_t cycleTime; // FIXME dependency on mw.c
 extern uint16_t rssi; // FIXME dependency on mw.c
-extern int16_t debug[4]; // FIXME dependency on mw.c
 
 void useRcControlsConfig(modeActivationCondition_t *modeActivationConditions, escAndServoConfig_t *escAndServoConfigToUse, pidProfile_t *pidProfileToUse);
 
@@ -121,7 +131,7 @@ void useRcControlsConfig(modeActivationCondition_t *modeActivationConditions, es
 #define MSP_PROTOCOL_VERSION                0
 
 #define API_VERSION_MAJOR                   1 // increment when major changes are made
-#define API_VERSION_MINOR                   4 // increment when any change is made, reset to zero when major changes are released after changing API_VERSION_MAJOR
+#define API_VERSION_MINOR                   9 // increment when any change is made, reset to zero when major changes are released after changing API_VERSION_MAJOR
 
 #define API_VERSION_LENGTH                  2
 
@@ -200,6 +210,26 @@ const char *boardIdentifier = TARGET_BOARD_IDENTIFIER;
 #define MSP_CF_SERIAL_CONFIG            54
 #define MSP_SET_CF_SERIAL_CONFIG        55
 
+#define MSP_VOLTAGE_METER_CONFIG        56
+#define MSP_SET_VOLTAGE_METER_CONFIG    57
+
+#define MSP_SONAR_ALTITUDE              58 //out message get sonar altitude [cm]
+
+#define MSP_PID_CONTROLLER              59
+#define MSP_SET_PID_CONTROLLER          60
+
+#define MSP_ARMING_CONFIG               61 //out message         Returns auto_disarm_delay and disarm_kill_switch parameters
+#define MSP_SET_ARMING_CONFIG           62 //in message          Sets auto_disarm_delay and disarm_kill_switch parameters
+
+#define MSP_DATAFLASH_SUMMARY           70 //out message - get description of dataflash chip
+#define MSP_DATAFLASH_READ              71 //out message - get content of dataflash chip
+#define MSP_DATAFLASH_ERASE             72 //in message - erase dataflash chip
+
+#define MSP_LOOP_TIME                   73 //out message         Returns FC cycle time i.e looptime parameter
+#define MSP_SET_LOOP_TIME               74 //in message          Sets FC cycle time i.e looptime parameter
+
+#define MSP_FAILSAFE_CONFIG             75 //out message         Returns FC Fail-Safe settings
+#define MSP_SET_FAILSAFE_CONFIG         76 //in message          Sets FC Fail-Safe settings
 //
 // Baseflight MSP commands (if enabled they exist in Cleanflight)
 //
@@ -208,8 +238,8 @@ const char *boardIdentifier = TARGET_BOARD_IDENTIFIER;
 
 // FIXME - Provided for backwards compatibility with configurator code until configurator is updated.
 // DEPRECATED - DO NOT USE "MSP_BF_CONFIG" and MSP_SET_BF_CONFIG.  In Cleanflight, isolated commands already exist and should be used instead.
-#define MSP_BF_CONFIG                      66 //out message baseflight-specific settings that aren't covered elsewhere
-#define MSP_SET_BF_CONFIG                  67 //in message baseflight-specific settings save
+#define MSP_BF_CONFIG                   66 //out message baseflight-specific settings that aren't covered elsewhere
+#define MSP_SET_BF_CONFIG               67 //in message baseflight-specific settings save
 
 #define MSP_REBOOT                      68 //in message reboot settings
 
@@ -341,6 +371,7 @@ typedef enum {
     HEADER_ARROW,
     HEADER_SIZE,
     HEADER_CMD,
+    COMMAND_RECEIVED
 } mspState_e;
 
 typedef enum {
@@ -365,7 +396,7 @@ static mspPort_t mspPorts[MAX_MSP_PORT_COUNT];
 
 static mspPort_t *currentPort;
 
-void serialize32(uint32_t a)
+static void serialize32(uint32_t a)
 {
     static uint8_t t;
     t = a;
@@ -382,7 +413,7 @@ void serialize32(uint32_t a)
     currentPort->checksum ^= t;
 }
 
-void serialize16(int16_t a)
+static void serialize16(int16_t a)
 {
     static uint8_t t;
     t = a;
@@ -393,71 +424,71 @@ void serialize16(int16_t a)
     currentPort->checksum ^= t;
 }
 
-void serialize8(uint8_t a)
+static void serialize8(uint8_t a)
 {
     serialWrite(mspSerialPort, a);
     currentPort->checksum ^= a;
 }
 
-uint8_t read8(void)
+static uint8_t read8(void)
 {
     return currentPort->inBuf[currentPort->indRX++] & 0xff;
 }
 
-uint16_t read16(void)
+static uint16_t read16(void)
 {
     uint16_t t = read8();
     t += (uint16_t)read8() << 8;
     return t;
 }
 
-uint32_t read32(void)
+static uint32_t read32(void)
 {
     uint32_t t = read16();
     t += (uint32_t)read16() << 16;
     return t;
 }
 
-void headSerialResponse(uint8_t err, uint8_t s)
+static void headSerialResponse(uint8_t err, uint8_t responseBodySize)
 {
     serialize8('$');
     serialize8('M');
     serialize8(err ? '!' : '>');
     currentPort->checksum = 0;               // start calculating a new checksum
-    serialize8(s);
+    serialize8(responseBodySize);
     serialize8(currentPort->cmdMSP);
 }
 
-void headSerialReply(uint8_t s)
+static void headSerialReply(uint8_t responseBodySize)
 {
-    headSerialResponse(0, s);
+    headSerialResponse(0, responseBodySize);
 }
 
-void headSerialError(uint8_t s)
+static void headSerialError(uint8_t responseBodySize)
 {
-    headSerialResponse(1, s);
+    headSerialResponse(1, responseBodySize);
 }
 
-void tailSerialReply(void)
+static void tailSerialReply(void)
 {
     serialize8(currentPort->checksum);
 }
 
-void s_struct(uint8_t *cb, uint8_t siz)
+static void s_struct(uint8_t *cb, uint8_t siz)
 {
     headSerialReply(siz);
     while (siz--)
         serialize8(*cb++);
 }
 
-void serializeNames(const char *s)
+static void serializeNames(const char *s)
 {
     const char *c;
     for (c = s; *c; c++)
         serialize8(*c);
 }
 
-const box_t *findBoxByActiveBoxId(uint8_t activeBoxId)
+static const box_t *findBoxByActiveBoxId(uint8_t activeBoxId)
 {
     uint8_t boxIndex;
     const box_t *candidate;
@@ -470,7 +501,7 @@ const box_t *findBoxByActiveBoxId(uint8_t activeBoxId)
     return NULL;
 }
 
-const box_t *findBoxByPermenantId(uint8_t permenantId)
+static const box_t *findBoxByPermenantId(uint8_t permenantId)
 {
     uint8_t boxIndex;
     const box_t *candidate;
@@ -483,7 +514,7 @@ const box_t *findBoxByPermenantId(uint8_t permenantId)
     return NULL;
 }
 
-void serializeBoxNamesReply(void)
+static void serializeBoxNamesReply(void)
 {
     int i, activeBoxId, j, flag = 1, count = 0, len;
     const box_t *box;
@@ -515,6 +546,46 @@ reset:
     }
 }
 
+static void serializeDataflashSummaryReply(void)
+{
+    headSerialReply(1 + 3 * 4);
+#ifdef USE_FLASHFS
+    const flashGeometry_t *geometry = flashfsGetGeometry();
+    serialize8(flashfsIsReady() ? 1 : 0);
+    serialize32(geometry->sectors);
+    serialize32(geometry->totalSize);
+    serialize32(flashfsGetOffset()); // Effectively the current number of bytes stored on the volume
+#else
+    serialize8(0);
+    serialize32(0);
+    serialize32(0);
+    serialize32(0);
+#endif
+}
+
+#ifdef USE_FLASHFS
+static void serializeDataflashReadReply(uint32_t address, uint8_t size)
+{
+    uint8_t buffer[128];
+    int bytesRead;
+
+    if (size > sizeof(buffer)) {
+        size = sizeof(buffer);
+    }
+
+    headSerialReply(4 + size);
+
+    serialize32(address);
+
+    // bytesRead will be lower than that requested if we reach end of volume
+    bytesRead = flashfsReadAbs(address, buffer, size);
+
+    for (int i = 0; i < bytesRead; i++) {
+        serialize8(buffer[i]);
+    }
+}
+#endif
+
 static void resetMspPort(mspPort_t *mspPortToReset, serialPort_t *serialPort, mspPortUsage_e usage)
 {
     memset(mspPortToReset, 0, sizeof(mspPort_t));
@@ -523,48 +594,31 @@ static void resetMspPort(mspPort_t *mspPortToReset, serialPort_t *serialPort, ms
     mspPortToReset->mspPortUsage = usage;
 }
 
-// This rate is chosen since softserial supports it.
-#define MSP_FALLBACK_BAUDRATE 19200
-
 void mspAllocateSerialPorts(serialConfig_t *serialConfig)
 {
-    serialPort_t *port;
+    UNUSED(serialConfig);
 
-    uint8_t portIndex;
+    serialPort_t *serialPort;
 
-    for (portIndex = 0; portIndex < MAX_MSP_PORT_COUNT; portIndex++) {
+    uint8_t portIndex = 0;
+
+    serialPortConfig_t *portConfig = findSerialPortConfig(FUNCTION_MSP);
+
+    while (portConfig && portIndex < MAX_MSP_PORT_COUNT) {
         mspPort_t *mspPort = &mspPorts[portIndex];
         if (mspPort->mspPortUsage != UNUSED_PORT) {
+            portIndex++;
             continue;
         }
 
-        uint32_t baudRate = serialConfig->msp_baudrate;
-
-        bool triedFallbackRate = false;
-        do {
-
-            port = openSerialPort(FUNCTION_MSP, NULL, baudRate, MODE_RXTX, SERIAL_NOT_INVERTED);
-            if (!port) {
-                if (triedFallbackRate) {
-                    break;
-                }
-
-                baudRate = MSP_FALLBACK_BAUDRATE;
-                triedFallbackRate = true;
-            }
-        } while (!port);
-
-        if (port && portIndex < MAX_MSP_PORT_COUNT) {
-            resetMspPort(mspPort, port, FOR_GENERAL_MSP);
+        serialPort = openSerialPort(portConfig->identifier, FUNCTION_MSP, NULL, baudRates[portConfig->msp_baudrateIndex], MODE_RXTX, SERIAL_NOT_INVERTED);
+        if (serialPort) {
+            resetMspPort(mspPort, serialPort, FOR_GENERAL_MSP);
+            portIndex++;
         }
-        if (!port) {
-            break;
-        }
+
+        portConfig = findNextSerialPortConfig(FUNCTION_MSP);
     }
-
-    // XXX this function might help with adding support for MSP on more than one port, if not delete it.
-    const serialPortFunctionList_t *serialPortFunctionList = getSerialPortFunctionList();
-    UNUSED(serialPortFunctionList);
 }
 
 void mspReleasePortIfAllocated(serialPort_t *serialPort)
@@ -573,7 +627,7 @@ void mspReleasePortIfAllocated(serialPort_t *serialPort)
     for (portIndex = 0; portIndex < MAX_MSP_PORT_COUNT; portIndex++) {
         mspPort_t *candidateMspPort = &mspPorts[portIndex];
         if (candidateMspPort->port == serialPort) {
-            endSerialPortFunction(serialPort, FUNCTION_MSP);
+            closeSerialPort(serialPort);
             memset(candidateMspPort, 0, sizeof(mspPort_t));
         }
     }
@@ -622,7 +676,7 @@ void mspInit(serialConfig_t *serialConfig)
         activeBoxIds[activeBoxIdCount++] = BOXLEDLOW;
     }
 #endif
-    
+
     if (feature(FEATURE_INFLIGHT_ACC_CAL))
         activeBoxIds[activeBoxIdCount++] = BOXCALIB;
 
@@ -648,7 +702,6 @@ void mspInit(serialConfig_t *serialConfig)
 static bool processOutCommand(uint8_t cmdMSP)
 {
     uint32_t i, tmp, junk;
-
 
 #ifdef GPS
     uint8_t wp_no;
@@ -784,6 +837,7 @@ static bool processOutCommand(uint8_t cmdMSP)
         for (i = 0; i < 3; i++)
             serialize16(magADC[i]);
         break;
+#ifdef USE_SERVOS
     case MSP_SERVO:
         s_struct((uint8_t *)&servo, 16);
         break;
@@ -802,6 +856,7 @@ static bool processOutCommand(uint8_t cmdMSP)
             serialize8(currentProfile->servoConf[i].forwardFromChannel);
         }
         break;
+#endif
     case MSP_MOTOR:
         s_struct((uint8_t *)motor, 16);
         break;
@@ -818,32 +873,55 @@ static bool processOutCommand(uint8_t cmdMSP)
         break;
     case MSP_ALTITUDE:
         headSerialReply(6);
-        serialize32(EstAlt);
+#if defined(BARO) || defined(SONAR)
+        serialize32(altitudeHoldGetEstimatedAltitude());
+#else
+        serialize32(0);
+#endif
         serialize16(vario);
+        break;
+    case MSP_SONAR_ALTITUDE:
+        headSerialReply(4);
+#if defined(SONAR)
+        serialize32(sonarGetLatestAltitude());
+#else
+        serialize32(0);
+#endif
         break;
     case MSP_ANALOG:
         headSerialReply(7);
         serialize8((uint8_t)constrain(vbat, 0, 255));
-        serialize16((uint16_t)constrain(mAhDrawn, 0, 0xFFFF)); // milliamphours drawn from battery
+        serialize16((uint16_t)constrain(mAhDrawn, 0, 0xFFFF)); // milliamp hours drawn from battery
         serialize16(rssi);
         if(masterConfig.batteryConfig.multiwiiCurrentMeterOutput) {
-            serialize16((uint16_t)constrain((abs(amperage) * 10), 0, 0xFFFF)); // send amperage in 0.001 A steps
+            serialize16((uint16_t)constrain(amperage * 10, 0, 0xFFFF)); // send amperage in 0.001 A steps. Negative range is truncated to zero
         } else
-            serialize16((uint16_t)constrain(abs(amperage), 0, 0xFFFF)); // send amperage in 0.01 A steps
+            serialize16((int16_t)constrain(amperage, -0x8000, 0x7FFF)); // send amperage in 0.01 A steps, range is -320A to 320A
+        break;
+    case MSP_ARMING_CONFIG:
+        headSerialReply(2);
+        serialize8(masterConfig.auto_disarm_delay); 
+        serialize8(masterConfig.disarm_kill_switch);
+        break;
+    case MSP_LOOP_TIME:
+        headSerialReply(2);
+        serialize16(masterConfig.looptime);
         break;
     case MSP_RC_TUNING:
-        headSerialReply(7);
+        headSerialReply(10);
         serialize8(currentControlRateProfile->rcRate8);
         serialize8(currentControlRateProfile->rcExpo8);
-        serialize8(currentControlRateProfile->rollPitchRate);
-        serialize8(currentControlRateProfile->yawRate);
+        for (i = 0 ; i < 3; i++) {
+            serialize8(currentControlRateProfile->rates[i]); // R,P,Y see flight_dynamics_index_t
+        }
         serialize8(currentControlRateProfile->dynThrPID);
         serialize8(currentControlRateProfile->thrMid8);
         serialize8(currentControlRateProfile->thrExpo8);
+        serialize16(currentControlRateProfile->tpa_breakpoint);
         break;
     case MSP_PID:
         headSerialReply(3 * PID_ITEM_COUNT);
-        if (currentProfile->pidController == 2) { // convert float stuff into uint8_t to keep backwards compatability with all 8-bit shit with new pid
+        if (IS_PID_CONTROLLER_FP_BASED(currentProfile->pidProfile.pidController)) { // convert float stuff into uint8_t to keep backwards compatability with all 8-bit shit with new pid
             for (i = 0; i < 3; i++) {
                 serialize8(constrain(lrintf(currentProfile->pidProfile.P_f[i] * 10.0f), 0, 250));
                 serialize8(constrain(lrintf(currentProfile->pidProfile.I_f[i] * 100.0f), 0, 250));
@@ -871,6 +949,10 @@ static bool processOutCommand(uint8_t cmdMSP)
     case MSP_PIDNAMES:
         headSerialReply(sizeof(pidnames) - 1);
         serializeNames(pidnames);
+        break;
+    case MSP_PID_CONTROLLER:
+        headSerialReply(1);
+        serialize8(currentProfile->pidProfile.pidController);
         break;
     case MSP_MODE_RANGES:
         headSerialReply(4 * MAX_MODE_ACTIVATION_CONDITION_COUNT);
@@ -916,14 +998,14 @@ static bool processOutCommand(uint8_t cmdMSP)
         }
         break;
     case MSP_MISC:
-        headSerialReply(2 * 6 + 4 + 2 + 4);
+        headSerialReply(2 * 5 + 3 + 3 + 2 + 4);
         serialize16(masterConfig.rxConfig.midrc);
 
         serialize16(masterConfig.escAndServoConfig.minthrottle);
         serialize16(masterConfig.escAndServoConfig.maxthrottle);
         serialize16(masterConfig.escAndServoConfig.mincommand);
 
-        serialize16(currentProfile->failsafeConfig.failsafe_throttle);
+        serialize16(masterConfig.failsafeConfig.failsafe_throttle);
 
 #ifdef GPS
         serialize8(masterConfig.gpsConfig.provider); // gps_type
@@ -997,10 +1079,12 @@ static bool processOutCommand(uint8_t cmdMSP)
         break;
 #endif
     case MSP_DEBUG:
-        headSerialReply(8);
-        // make use of this crap, output some useful QA statistics
-        //debug[3] = ((hse_value / 1000000) * 1000) + (SystemCoreClock / 1000000);         // XX0YY [crystal clock : core clock]
-        for (i = 0; i < 4; i++)
+        headSerialReply(DEBUG16_VALUE_COUNT * sizeof(debug[0]));
+
+        // output some useful QA statistics
+        // debug[x] = ((hse_value / 1000000) * 1000) + (SystemCoreClock / 1000000);         // XX0YY [crystal clock : core clock]
+
+        for (i = 0; i < DEBUG16_VALUE_COUNT; i++)
             serialize16(debug[i]);      // 4 variables are here for general monitoring purpose
         break;
 
@@ -1024,16 +1108,26 @@ static bool processOutCommand(uint8_t cmdMSP)
         break;
 
     case MSP_BOARD_ALIGNMENT:
-        headSerialReply(3);
+        headSerialReply(6);
         serialize16(masterConfig.boardAlignment.rollDegrees);
         serialize16(masterConfig.boardAlignment.pitchDegrees);
         serialize16(masterConfig.boardAlignment.yawDegrees);
         break;
 
-    case MSP_CURRENT_METER_CONFIG:
+    case MSP_VOLTAGE_METER_CONFIG:
         headSerialReply(4);
+        serialize8(masterConfig.batteryConfig.vbatscale);
+        serialize8(masterConfig.batteryConfig.vbatmincellvoltage);
+        serialize8(masterConfig.batteryConfig.vbatmaxcellvoltage);
+        serialize8(masterConfig.batteryConfig.vbatwarningcellvoltage);
+        break;
+
+    case MSP_CURRENT_METER_CONFIG:
+        headSerialReply(7);
         serialize16(masterConfig.batteryConfig.currentMeterScale);
         serialize16(masterConfig.batteryConfig.currentMeterOffset);
+        serialize8(masterConfig.batteryConfig.currentMeterType);
+        serialize16(masterConfig.batteryConfig.batteryCapacity);
         break;
 
     case MSP_MIXER:
@@ -1042,12 +1136,21 @@ static bool processOutCommand(uint8_t cmdMSP)
         break;
 
     case MSP_RX_CONFIG:
-        headSerialReply(7);
+        headSerialReply(8);
         serialize8(masterConfig.rxConfig.serialrx_provider);
         serialize16(masterConfig.rxConfig.maxcheck);
         serialize16(masterConfig.rxConfig.midrc);
         serialize16(masterConfig.rxConfig.mincheck);
         serialize8(masterConfig.rxConfig.spektrum_sat_bind);
+        serialize16(masterConfig.rxConfig.rx_min_usec);
+        serialize16(masterConfig.rxConfig.rx_max_usec);
+        break;
+
+    case MSP_FAILSAFE_CONFIG:
+        headSerialReply(8);
+        serialize8(masterConfig.failsafeConfig.failsafe_delay);
+        serialize8(masterConfig.failsafeConfig.failsafe_off_delay);
+        serialize16(masterConfig.failsafeConfig.failsafe_throttle);
         break;
 
     case MSP_RSSI_CONFIG:
@@ -1079,17 +1182,16 @@ static bool processOutCommand(uint8_t cmdMSP)
 
     case MSP_CF_SERIAL_CONFIG:
         headSerialReply(
-            ((sizeof(uint8_t) * 2) * SERIAL_PORT_COUNT) +
-            (sizeof(uint32_t) * 4)
+            ((sizeof(uint8_t) + sizeof(uint16_t) + (sizeof(uint8_t) * 4)) * SERIAL_PORT_COUNT)
         );
         for (i = 0; i < SERIAL_PORT_COUNT; i++) {
-            serialize8(serialPortConstraints[i].identifier);
-            serialize8(masterConfig.serialConfig.serial_port_scenario[i]);
+            serialize8(masterConfig.serialConfig.portConfigs[i].identifier);
+            serialize16(masterConfig.serialConfig.portConfigs[i].functionMask);
+            serialize8(masterConfig.serialConfig.portConfigs[i].msp_baudrateIndex);
+            serialize8(masterConfig.serialConfig.portConfigs[i].gps_baudrateIndex);
+            serialize8(masterConfig.serialConfig.portConfigs[i].telemetry_baudrateIndex);
+            serialize8(masterConfig.serialConfig.portConfigs[i].blackbox_baudrateIndex);
         }
-        serialize32(masterConfig.serialConfig.msp_baudrate);
-        serialize32(masterConfig.serialConfig.cli_baudrate);
-        serialize32(masterConfig.serialConfig.gps_baudrate);
-        serialize32(masterConfig.serialConfig.gps_passthrough_baudrate);
         break;
 
 #ifdef LED_STRIP
@@ -1115,6 +1217,21 @@ static bool processOutCommand(uint8_t cmdMSP)
         }
         break;
 #endif
+
+    case MSP_DATAFLASH_SUMMARY:
+        serializeDataflashSummaryReply();
+        break;
+
+#ifdef USE_FLASHFS
+    case MSP_DATAFLASH_READ:
+        {
+            uint32_t readAddress = read32();
+
+            serializeDataflashReadReply(readAddress, 128);
+        }
+        break;
+#endif
+
     case MSP_BF_BUILD_INFO:
         headSerialReply(11 + 4 + 4);
         for (i = 0; i < 11; i++)
@@ -1133,6 +1250,7 @@ static bool processInCommand(void)
 {
     uint32_t i;
     uint16_t tmp;
+    uint8_t rate;
 #ifdef GPS
     uint8_t wp_no;
     int32_t lat = 0, lon = 0, alt = 0;
@@ -1168,8 +1286,19 @@ static bool processInCommand(void)
         currentProfile->accelerometerTrims.values.pitch = read16();
         currentProfile->accelerometerTrims.values.roll  = read16();
         break;
+    case MSP_SET_ARMING_CONFIG:
+        masterConfig.auto_disarm_delay = read8();
+        masterConfig.disarm_kill_switch = read8();
+        break;
+    case MSP_SET_LOOP_TIME:
+        masterConfig.looptime = read16();
+        break;
+    case MSP_SET_PID_CONTROLLER:
+        currentProfile->pidProfile.pidController = read8();
+        pidSetController(currentProfile->pidProfile.pidController);
+        break;
     case MSP_SET_PID:
-        if (currentProfile->pidController == 2) {
+        if (IS_PID_CONTROLLER_FP_BASED(currentProfile->pidProfile.pidController)) {
             for (i = 0; i < 3; i++) {
                 currentProfile->pidProfile.P_f[i] = (float)read8() / 10.0f;
                 currentProfile->pidProfile.I_f[i] = (float)read8() / 100.0f;
@@ -1235,13 +1364,21 @@ static bool processInCommand(void)
         break;
 
     case MSP_SET_RC_TUNING:
-        currentControlRateProfile->rcRate8 = read8();
-        currentControlRateProfile->rcExpo8 = read8();
-        currentControlRateProfile->rollPitchRate = read8();
-        currentControlRateProfile->yawRate = read8();
-        currentControlRateProfile->dynThrPID = read8();
-        currentControlRateProfile->thrMid8 = read8();
-        currentControlRateProfile->thrExpo8 = read8();
+        if (currentPort->dataSize == 10) {//allow for tpa_breakpoint
+            currentControlRateProfile->rcRate8 = read8();
+            currentControlRateProfile->rcExpo8 = read8();
+            for (i = 0; i < 3; i++) {
+                rate = read8();
+                currentControlRateProfile->rates[i] = MIN(rate, i == FD_YAW ? CONTROL_RATE_CONFIG_YAW_RATE_MAX : CONTROL_RATE_CONFIG_ROLL_PITCH_RATE_MAX);
+            }
+            rate = read8();
+            currentControlRateProfile->dynThrPID = MIN(rate, CONTROL_RATE_CONFIG_TPA_MAX);
+            currentControlRateProfile->thrMid8 = read8();
+            currentControlRateProfile->thrExpo8 = read8();
+            currentControlRateProfile->tpa_breakpoint = read16();
+        } else {
+            headSerialError(0);
+        }
         break;
     case MSP_SET_MISC:
         tmp = read16();
@@ -1252,7 +1389,7 @@ static bool processInCommand(void)
         masterConfig.escAndServoConfig.maxthrottle = read16();
         masterConfig.escAndServoConfig.mincommand = read16();
 
-        currentProfile->failsafeConfig.failsafe_throttle = read16();
+        masterConfig.failsafeConfig.failsafe_throttle = read16();
 
 #ifdef GPS
         masterConfig.gpsConfig.provider = read8(); // gps_type
@@ -1279,6 +1416,7 @@ static bool processInCommand(void)
             motor_disarmed[i] = read16();
         break;
     case MSP_SET_SERVO_CONF:
+#ifdef USE_SERVOS
         for (i = 0; i < MAX_SUPPORTED_SERVOS; i++) {
             currentProfile->servoConf[i].min = read16();
             currentProfile->servoConf[i].max = read16();
@@ -1292,11 +1430,14 @@ static bool processInCommand(void)
             }
             currentProfile->servoConf[i].rate = read8();
         }
+#endif
         break;
     case MSP_SET_CHANNEL_FORWARDING:
+#ifdef USE_SERVOS
         for (i = 0; i < MAX_SUPPORTED_SERVOS; i++) {
             currentProfile->servoConf[i].forwardFromChannel = read8();
         }
+#endif
         break;
     case MSP_RESET_CONF:
         if (!ARMING_FLAG(ARMED)) {
@@ -1320,6 +1461,13 @@ static bool processInCommand(void)
         writeEEPROM();
         readEEPROM();
         break;
+
+#ifdef USE_FLASHFS
+    case MSP_DATAFLASH_ERASE:
+        flashfsEraseCompletely();
+        break;
+#endif
+
 #ifdef GPS
     case MSP_SET_RAW_GPS:
         if (read8()) {
@@ -1370,9 +1518,18 @@ static bool processInCommand(void)
         masterConfig.boardAlignment.yawDegrees = read16();
         break;
 
+    case MSP_SET_VOLTAGE_METER_CONFIG:
+        masterConfig.batteryConfig.vbatscale = read8();           // actual vbatscale as intended
+        masterConfig.batteryConfig.vbatmincellvoltage = read8();  // vbatlevel_warn1 in MWC2.3 GUI
+        masterConfig.batteryConfig.vbatmaxcellvoltage = read8();  // vbatlevel_warn2 in MWC2.3 GUI
+        masterConfig.batteryConfig.vbatwarningcellvoltage = read8();  // vbatlevel when buzzer starts to alert
+        break;
+
     case MSP_SET_CURRENT_METER_CONFIG:
         masterConfig.batteryConfig.currentMeterScale = read16();
         masterConfig.batteryConfig.currentMeterOffset = read16();
+        masterConfig.batteryConfig.currentMeterType = read8();
+        masterConfig.batteryConfig.batteryCapacity = read16();
         break;
 
 #ifndef USE_QUAD_MIXER_ONLY
@@ -1387,6 +1544,16 @@ static bool processInCommand(void)
         masterConfig.rxConfig.midrc = read16();
         masterConfig.rxConfig.mincheck = read16();
         masterConfig.rxConfig.spektrum_sat_bind = read8();
+        if (currentPort->dataSize > 8) {
+            masterConfig.rxConfig.rx_min_usec = read16();
+            masterConfig.rxConfig.rx_max_usec = read16();
+        }
+        break;
+
+    case MSP_SET_FAILSAFE_CONFIG:
+        masterConfig.failsafeConfig.failsafe_delay = read8();
+        masterConfig.failsafeConfig.failsafe_off_delay = read8();
+        masterConfig.failsafeConfig.failsafe_throttle = read16();
         break;
 
     case MSP_SET_RSSI_CONFIG:
@@ -1422,19 +1589,20 @@ static bool processInCommand(void)
 
     case MSP_SET_CF_SERIAL_CONFIG:
         {
-            uint8_t baudRateSize = (sizeof(uint32_t) * 4);
-            uint8_t serialPortCount = currentPort->dataSize - baudRateSize;
-            if (serialPortCount != SERIAL_PORT_COUNT) {
+            uint8_t portConfigSize = sizeof(uint8_t) + sizeof(uint16_t) + (sizeof(uint8_t) * 4);
+
+            if ((SERIAL_PORT_COUNT * portConfigSize) != currentPort->dataSize) {
                 headSerialError(0);
                 break;
             }
             for (i = 0; i < SERIAL_PORT_COUNT; i++) {
-                masterConfig.serialConfig.serial_port_scenario[i] = read8();
+                masterConfig.serialConfig.portConfigs[i].identifier = read8();
+                masterConfig.serialConfig.portConfigs[i].functionMask = read16();
+                masterConfig.serialConfig.portConfigs[i].msp_baudrateIndex = read8();
+                masterConfig.serialConfig.portConfigs[i].gps_baudrateIndex = read8();
+                masterConfig.serialConfig.portConfigs[i].telemetry_baudrateIndex = read8();
+                masterConfig.serialConfig.portConfigs[i].blackbox_baudrateIndex = read8();
             }
-            masterConfig.serialConfig.msp_baudrate = read32();
-            masterConfig.serialConfig.cli_baudrate = read32();
-            masterConfig.serialConfig.gps_baudrate = read32();
-            masterConfig.serialConfig.gps_passthrough_baudrate = read32();
         }
         break;
 
@@ -1489,51 +1657,53 @@ static bool processInCommand(void)
     return true;
 }
 
-static void mspProcessPort(void)
+static void mspProcessReceivedCommand() {
+    if (!(processOutCommand(currentPort->cmdMSP) || processInCommand())) {
+        headSerialError(0);
+    }
+    tailSerialReply();
+    currentPort->c_state = IDLE;
+}
+
+static bool mspProcessReceivedData(uint8_t c)
 {
-    uint8_t c;
+    if (currentPort->c_state == IDLE) {
+        if (c == '$') {
+            currentPort->c_state = HEADER_START;
+        } else {
+            return false;
+        }
+    } else if (currentPort->c_state == HEADER_START) {
+        currentPort->c_state = (c == 'M') ? HEADER_M : IDLE;
+    } else if (currentPort->c_state == HEADER_M) {
+        currentPort->c_state = (c == '<') ? HEADER_ARROW : IDLE;
+    } else if (currentPort->c_state == HEADER_ARROW) {
+        if (c > INBUF_SIZE) {
+            currentPort->c_state = IDLE;
 
-    while (serialTotalBytesWaiting(mspSerialPort)) {
-        c = serialRead(mspSerialPort);
-
-        if (currentPort->c_state == IDLE) {
-            currentPort->c_state = (c == '$') ? HEADER_START : IDLE;
-            if (currentPort->c_state == IDLE && !ARMING_FLAG(ARMED))
-                evaluateOtherData(c); // if not armed evaluate all other incoming serial data
-        } else if (currentPort->c_state == HEADER_START) {
-            currentPort->c_state = (c == 'M') ? HEADER_M : IDLE;
-        } else if (currentPort->c_state == HEADER_M) {
-            currentPort->c_state = (c == '<') ? HEADER_ARROW : IDLE;
-        } else if (currentPort->c_state == HEADER_ARROW) {
-            if (c > INBUF_SIZE) {       // now we are expecting the payload size
-                currentPort->c_state = IDLE;
-                continue;
-            }
+        } else {
             currentPort->dataSize = c;
             currentPort->offset = 0;
             currentPort->checksum = 0;
             currentPort->indRX = 0;
             currentPort->checksum ^= c;
-            currentPort->c_state = HEADER_SIZE;      // the command is to follow
-        } else if (currentPort->c_state == HEADER_SIZE) {
-            currentPort->cmdMSP = c;
-            currentPort->checksum ^= c;
-            currentPort->c_state = HEADER_CMD;
-        } else if (currentPort->c_state == HEADER_CMD && currentPort->offset < currentPort->dataSize) {
-            currentPort->checksum ^= c;
-            currentPort->inBuf[currentPort->offset++] = c;
-        } else if (currentPort->c_state == HEADER_CMD && currentPort->offset >= currentPort->dataSize) {
-            if (currentPort->checksum == c) {        // compare calculated and transferred checksum
-                // we got a valid packet, evaluate it
-                if (!(processOutCommand(currentPort->cmdMSP) || processInCommand())) {
-                    headSerialError(0);
-                }
-                tailSerialReply();
-            }
+            currentPort->c_state = HEADER_SIZE;
+        }
+    } else if (currentPort->c_state == HEADER_SIZE) {
+        currentPort->cmdMSP = c;
+        currentPort->checksum ^= c;
+        currentPort->c_state = HEADER_CMD;
+    } else if (currentPort->c_state == HEADER_CMD && currentPort->offset < currentPort->dataSize) {
+        currentPort->checksum ^= c;
+        currentPort->inBuf[currentPort->offset++] = c;
+    } else if (currentPort->c_state == HEADER_CMD && currentPort->offset >= currentPort->dataSize) {
+        if (currentPort->checksum == c) {
+            currentPort->c_state = COMMAND_RECEIVED;
+        } else {
             currentPort->c_state = IDLE;
-            break; // process one command so as not to block.
         }
     }
+    return true;
 }
 
 void setCurrentPort(mspPort_t *port)
@@ -1554,13 +1724,28 @@ void mspProcess(void)
         }
 
         setCurrentPort(candidatePort);
-        mspProcessPort();
+
+        while (serialTotalBytesWaiting(mspSerialPort)) {
+
+            uint8_t c = serialRead(mspSerialPort);
+            bool consumed = mspProcessReceivedData(c);
+
+            if (!consumed && !ARMING_FLAG(ARMED)) {
+                evaluateOtherData(mspSerialPort, c);
+            }
+
+            if (currentPort->c_state == COMMAND_RECEIVED) {
+                mspProcessReceivedCommand();
+                break; // process one command at a time so as not to block.
+            }
+        }
 
         if (isRebootScheduled) {
             // pause a little while to allow response to be sent
             while (!isSerialTransmitBufferEmpty(candidatePort->port)) {
                 delay(50);
             }
+            stopMotors();
             systemReset();
         }
     }
@@ -1579,7 +1764,7 @@ static const uint8_t mspTelemetryCommandSequence[] = {
     MSP_SERVO
 };
 
-#define MSP_TELEMETRY_COMMAND_SEQUENCE_ENTRY_COUNT (sizeof(mspTelemetryCommandSequence) / sizeof(mspTelemetryCommandSequence[0]))
+#define TELEMETRY_MSP_COMMAND_SEQUENCE_ENTRY_COUNT (sizeof(mspTelemetryCommandSequence) / sizeof(mspTelemetryCommandSequence[0]))
 
 static mspPort_t *mspTelemetryPort = NULL;
 
@@ -1630,7 +1815,7 @@ void sendMspTelemetry(void)
     tailSerialReply();
 
     sequenceIndex++;
-    if (sequenceIndex >= MSP_TELEMETRY_COMMAND_SEQUENCE_ENTRY_COUNT) {
+    if (sequenceIndex >= TELEMETRY_MSP_COMMAND_SEQUENCE_ENTRY_COUNT) {
         sequenceIndex = 0;
     }
 }

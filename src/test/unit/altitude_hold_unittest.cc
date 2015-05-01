@@ -20,27 +20,34 @@
 
 #include <limits.h>
 
+//#define DEBUG_ALTITUDE_HOLD
+
 #define BARO
 
 extern "C" {
+    #include "debug.h"
+
     #include "common/axis.h"
-    #include "flight/flight.h"
+    #include "common/maths.h"
+
+    #include "drivers/sensor.h"
+    #include "drivers/accgyro.h"
 
     #include "sensors/sensors.h"
-    #include "drivers/accgyro.h"
     #include "sensors/acceleration.h"
     #include "sensors/barometer.h"
 
-    #include "flight/mixer.h"
-    #include "flight/mixer.h"
-
     #include "io/escservo.h"
-    #include "rx/rx.h"
     #include "io/rc_controls.h"
 
-    #include "config/runtime_config.h"
+    #include "rx/rx.h"
 
+    #include "flight/mixer.h"
+    #include "flight/pid.h"
+    #include "flight/imu.h"
     #include "flight/altitudehold.h"
+
+    #include "config/runtime_config.h"
 
 }
 
@@ -53,6 +60,7 @@ extern "C" {
 
 extern "C" {
     bool isThrustFacingDownwards(rollAndPitchInclination_t *inclinations);
+    uint16_t calculateTiltAngle(rollAndPitchInclination_t *inclinations);
 }
 
 typedef struct inclinationExpectation_s {
@@ -65,17 +73,17 @@ TEST(AltitudeHoldTest, IsThrustFacingDownwards)
     // given
 
     inclinationExpectation_t inclinationExpectations[] = {
-            { { 0, 0 }, DOWNWARDS_THRUST },
-            { { 799, 799 }, DOWNWARDS_THRUST },
-            { { 800, 799 }, UPWARDS_THRUST },
-            { { 799, 800 }, UPWARDS_THRUST },
-            { { 800, 800 }, UPWARDS_THRUST },
-            { { 801, 801 }, UPWARDS_THRUST },
-            { { -799, -799 }, DOWNWARDS_THRUST },
-            { { -800, -799 }, UPWARDS_THRUST },
-            { { -799, -800 }, UPWARDS_THRUST },
-            { { -800, -800 }, UPWARDS_THRUST },
-            { { -801, -801 }, UPWARDS_THRUST }
+            { {{    0,    0 }}, DOWNWARDS_THRUST },
+            { {{  799,  799 }}, DOWNWARDS_THRUST },
+            { {{  800,  799 }}, UPWARDS_THRUST },
+            { {{  799,  800 }}, UPWARDS_THRUST },
+            { {{  800,  800 }}, UPWARDS_THRUST },
+            { {{  801,  801 }}, UPWARDS_THRUST },
+            { {{ -799, -799 }}, DOWNWARDS_THRUST },
+            { {{ -800, -799 }}, UPWARDS_THRUST },
+            { {{ -799, -800 }}, UPWARDS_THRUST },
+            { {{ -800, -800 }}, UPWARDS_THRUST },
+            { {{ -801, -801 }}, UPWARDS_THRUST }
     };
     uint8_t testIterationCount = sizeof(inclinationExpectations) / sizeof(inclinationExpectation_t);
 
@@ -83,9 +91,41 @@ TEST(AltitudeHoldTest, IsThrustFacingDownwards)
 
     for (uint8_t index = 0; index < testIterationCount; index ++) {
         inclinationExpectation_t *angleInclinationExpectation = &inclinationExpectations[index];
+#ifdef DEBUG_ALTITUDE_HOLD
         printf("iteration: %d\n", index);
+#endif
         bool result = isThrustFacingDownwards(&angleInclinationExpectation->inclination);
         EXPECT_EQ(angleInclinationExpectation->expectDownwardsThrust, result);
+    }
+}
+
+typedef struct inclinationAngleExpectations_s {
+    rollAndPitchInclination_t inclination;
+    uint16_t expected_angle;
+} inclinationAngleExpectations_t;
+
+TEST(AltitudeHoldTest, TestCalculateTiltAngle)
+{
+    inclinationAngleExpectations_t inclinationAngleExpectations[] = {
+        { {{ 0,  0}}, 0},
+        { {{ 1,  0}}, 1},
+        { {{ 0,  1}}, 1},
+        { {{ 0, -1}}, 1},
+        { {{-1,  0}}, 1},
+        { {{-1, -2}}, 2},
+        { {{-2, -1}}, 2},
+        { {{ 1,  2}}, 2},
+        { {{ 2,  1}}, 2}
+    };
+
+    rollAndPitchInclination_t inclination = {{0, 0}};
+    uint16_t tilt_angle = calculateTiltAngle(&inclination);
+    EXPECT_EQ(tilt_angle, 0);
+
+    for (uint8_t i = 0; i < 9; i++) {
+        inclinationAngleExpectations_t *expectation = &inclinationAngleExpectations[i];
+        uint16_t result = calculateTiltAngle(&expectation->inclination);
+        EXPECT_EQ(expectation->expected_angle, result);
     }
 }
 
@@ -94,6 +134,7 @@ TEST(AltitudeHoldTest, IsThrustFacingDownwards)
 extern "C" {
 uint32_t rcModeActivationMask;
 int16_t rcCommand[4];
+int16_t rcData[MAX_SUPPORTED_RC_CHANNEL_COUNT];
 
 uint32_t accTimeSum ;        // keep track for integration of acc
 int accSumCount;
@@ -107,7 +148,7 @@ rollAndPitchInclination_t inclination;
 int32_t accSum[XYZ_AXIS_COUNT];
 //int16_t magADC[XYZ_AXIS_COUNT];
 int32_t BaroAlt;
-int16_t debug[4];
+int16_t debug[DEBUG16_VALUE_COUNT];
 
 uint8_t stateFlags;
 uint16_t flightModeFlags;
@@ -116,7 +157,17 @@ uint8_t armingFlags;
 int32_t sonarAlt;
 
 
-void gyroGetADC(void) {};
+uint16_t enableFlightMode(flightModeFlags_e mask)
+{
+    return flightModeFlags |= (mask);
+}
+
+uint16_t disableFlightMode(flightModeFlags_e mask)
+{
+    return flightModeFlags &= ~(mask);
+}
+
+void gyroUpdate(void) {};
 bool sensors(uint32_t mask)
 {
     UNUSED(mask);
@@ -127,7 +178,7 @@ void updateAccelerationReadings(rollAndPitchTrims_t *rollAndPitchTrims)
     UNUSED(rollAndPitchTrims);
 }
 
-void accSum_reset(void) {};
+void imuResetAccelerationSum(void) {};
 
 int32_t applyDeadband(int32_t, int32_t) { return 0; }
 uint32_t micros(void) { return 0; }

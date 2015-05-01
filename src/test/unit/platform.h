@@ -22,6 +22,26 @@
 #define GPS
 #define TELEMETRY
 #define LED_STRIP
+#define USE_SERVOS
 
 #define SERIAL_PORT_COUNT 4
+
+#define MAX_SIMULTANEOUS_ADJUSTMENT_COUNT 6
+
+typedef enum
+{
+    Mode_TEST = 0x0,
+} GPIO_Mode;
+
+typedef struct
+{
+    void* test;
+} GPIO_TypeDef;
+
+typedef struct
+{
+    void* test;
+} TIM_TypeDef;
+
+typedef enum {DISABLE = 0, ENABLE = !DISABLE} FunctionalState;
 

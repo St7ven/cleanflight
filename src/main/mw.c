@@ -37,7 +37,6 @@
 #include "drivers/timer.h"
 #include "drivers/pwm_rx.h"
 
-#include "flight/flight.h"
 #include "sensors/sensors.h"
 #include "sensors/boardalignment.h"
 #include "sensors/sonar.h"
@@ -46,18 +45,12 @@
 #include "sensors/barometer.h"
 #include "sensors/gyro.h"
 #include "sensors/battery.h"
+
 #include "io/beeper.h"
 #include "io/display.h"
 #include "io/escservo.h"
-#include "rx/rx.h"
 #include "io/rc_controls.h"
 #include "io/rc_curves.h"
-#include "flight/mixer.h"
-#include "flight/altitudehold.h"
-#include "flight/failsafe.h"
-#include "flight/imu.h"
-#include "flight/autotune.h"
-#include "flight/navigation.h"
 #include "io/gimbal.h"
 #include "io/gps.h"
 #include "io/ledstrip.h"
@@ -65,9 +58,21 @@
 #include "io/serial_cli.h"
 #include "io/serial_msp.h"
 #include "io/statusindicator.h"
+
+#include "rx/rx.h"
 #include "rx/msp.h"
+
 #include "telemetry/telemetry.h"
 #include "blackbox/blackbox.h"
+
+#include "flight/mixer.h"
+#include "flight/pid.h"
+#include "flight/imu.h"
+#include "flight/altitudehold.h"
+#include "flight/failsafe.h"
+#include "flight/autotune.h"
+#include "flight/navigation.h"
+
 
 #include "config/runtime_config.h"
 #include "config/config.h"
@@ -85,17 +90,17 @@ enum {
 /* for VBAT monitoring frequency */
 #define VBATFREQ 6        // to read battery voltage - nth number of loop iterations
 
-int16_t debug[4];
 uint32_t currentTime = 0;
 uint32_t previousTime = 0;
 uint16_t cycleTime = 0;         // this is the number in micro second to achieve a full loop, it can differ a little and is taken into account in the PID loop
+
+int16_t magHold;
 int16_t headFreeModeHold;
 
 int16_t telemTemperature1;      // gyro sensor temperature
 static uint32_t disarmAt;     // Time of automatic disarm when "Don't spin the motors when armed" is enabled and auto_disarm_delay is nonzero
 
 extern uint8_t dynP8[3], dynI8[3], dynD8[3];
-extern failsafe_t *failsafe;
 
 typedef void (*pidControllerFuncPtr)(pidProfile_t *pidProfile, controlRateConfig_t *controlRateConfig,
         uint16_t max_angle_inclination, rollAndPitchTrims_t *angleTrim, rxConfig_t *rxConfig);            // pid controller function prototype
@@ -124,7 +129,7 @@ void updateAutotuneState(void)
                     autotuneReset();
                     landedAfterAutoTuning = false;
                 }
-                autotuneBeginNextPhase(&currentProfile->pidProfile, currentProfile->pidController);
+                autotuneBeginNextPhase(&currentProfile->pidProfile);
                 ENABLE_FLIGHT_MODE(AUTOTUNE_MODE);
                 autoTuneWasUsed = true;
             } else {
@@ -151,8 +156,8 @@ void updateAutotuneState(void)
 bool isCalibrating()
 {
 #ifdef BARO
-    if (sensors(SENSOR_ACC) && !isBaroCalibrationComplete()) {
-        return false;
+    if (sensors(SENSOR_BARO) && !isBaroCalibrationComplete()) {
+        return true;
     }
 #endif
 
@@ -170,7 +175,7 @@ void annexCode(void)
     static uint8_t vbatTimer = 0;
     static int32_t vbatCycleTime = 0;
 
-    // PITCH & ROLL only dynamic PID adjustemnt,  depending on throttle value
+    // PITCH & ROLL only dynamic PID adjustment,  depending on throttle value
     if (rcData[THROTTLE] < currentControlRateProfile->tpa_breakpoint) {
         prop2 = 100;
     } else {
@@ -182,7 +187,7 @@ void annexCode(void)
     }
 
     for (axis = 0; axis < 3; axis++) {
-        tmp = min(abs(rcData[axis] - masterConfig.rxConfig.midrc), 500);
+        tmp = MIN(ABS(rcData[axis] - masterConfig.rxConfig.midrc), 500);
         if (axis == ROLL || axis == PITCH) {
             if (currentProfile->rcControlsConfig.deadband) {
                 if (tmp > currentProfile->rcControlsConfig.deadband) {
@@ -194,7 +199,7 @@ void annexCode(void)
 
             tmp2 = tmp / 100;
             rcCommand[axis] = lookupPitchRollRC[tmp2] + (tmp - tmp2 * 100) * (lookupPitchRollRC[tmp2 + 1] - lookupPitchRollRC[tmp2]) / 100;
-            prop1 = 100 - (uint16_t)currentControlRateProfile->rollPitchRate * tmp / 500;
+            prop1 = 100 - (uint16_t)currentControlRateProfile->rates[axis] * tmp / 500;
             prop1 = (uint16_t)prop1 * prop2 / 100;
         } else if (axis == YAW) {
             if (currentProfile->rcControlsConfig.yaw_deadband) {
@@ -205,7 +210,7 @@ void annexCode(void)
                 }
             }
             rcCommand[axis] = tmp * -masterConfig.yaw_control_direction;
-            prop1 = 100 - (uint16_t)currentControlRateProfile->yawRate * abs(tmp) / 500;
+            prop1 = 100 - (uint16_t)currentControlRateProfile->rates[axis] * ABS(tmp) / 500;
         }
         // FIXME axis indexes into pids.  use something like lookupPidIndex(rc_alias_e alias) to reduce coupling.
         dynP8[axis] = (uint16_t)currentProfile->pidProfile.P8[axis] * prop1 / 100;
@@ -237,16 +242,21 @@ void annexCode(void)
             if (feature(FEATURE_VBAT)) {
                 updateBatteryVoltage();
                 batteryState = calculateBatteryState();
+                //handle beepers for battery levels
+                if (batteryState == BATTERY_CRITICAL)
+                    beeper(BEEPER_BAT_CRIT_LOW);    //critically low battery
+                else if (batteryState == BATTERY_WARNING)
+                    beeper(BEEPER_BAT_LOW);         //low battery
             }
 
             if (feature(FEATURE_CURRENT_METER)) {
-                updateCurrentMeter(vbatCycleTime);
+                updateCurrentMeter(vbatCycleTime, &masterConfig.rxConfig, masterConfig.flight3DConfig.deadband3d_throttle);
             }
             vbatCycleTime = 0;
         }
     }
 
-    beepcodeUpdateState(batteryState);
+    beeperUpdate();          //call periodic beeper handler
 
     if (ARMING_FLAG(ARMED)) {
         LED0_ON;
@@ -303,9 +313,7 @@ void mwDisarm(void)
         if (feature(FEATURE_TELEMETRY)) {
             // the telemetry state must be checked immediately so that shared serial ports are released.
             checkTelemetryState();
-            if (isSerialPortFunctionShared(FUNCTION_TELEMETRY, FUNCTION_MSP)) {
-                mspAllocateSerialPorts(&masterConfig.serialConfig);
-            }
+            mspAllocateSerialPorts(&masterConfig.serialConfig);
         }
 #endif
 
@@ -314,8 +322,12 @@ void mwDisarm(void)
             finishBlackbox();
         }
 #endif
+
+        beeper(BEEPER_DISARMING);      // emit disarm tone
     }
 }
+
+#define TELEMETRY_FUNCTION_MASK (FUNCTION_TELEMETRY_FRSKY | FUNCTION_TELEMETRY_HOTT | FUNCTION_TELEMETRY_MSP | FUNCTION_TELEMETRY_SMARTPORT)
 
 void mwArm(void)
 {
@@ -329,9 +341,12 @@ void mwArm(void)
 
 #ifdef TELEMETRY
             if (feature(FEATURE_TELEMETRY)) {
-                serialPort_t *sharedTelemetryAndMspPort = findSharedSerialPort(FUNCTION_TELEMETRY, FUNCTION_MSP);
-                if (sharedTelemetryAndMspPort) {
-                    mspReleasePortIfAllocated(sharedTelemetryAndMspPort);
+
+
+                serialPort_t *sharedPort = findSharedSerialPort(TELEMETRY_FUNCTION_MASK, FUNCTION_MSP);
+                while (sharedPort) {
+                    mspReleasePortIfAllocated(sharedPort);
+                    sharedPort = findNextSharedSerialPort(TELEMETRY_FUNCTION_MASK, FUNCTION_MSP);
                 }
             }
 #endif
@@ -346,6 +361,16 @@ void mwArm(void)
             }
 #endif
             disarmAt = millis() + masterConfig.auto_disarm_delay * 1000;   // start disarm timeout, will be extended when throttle is nonzero
+
+            //beep to indicate arming
+#ifdef GPS
+            if (feature(FEATURE_GPS) && STATE(GPS_FIX) && GPS_numSat >= 5)
+                beeper(BEEPER_ARMING_GPS_FIX);
+            else
+                beeper(BEEPER_ARMING);
+#else
+            beeper(BEEPER_ARMING);
+#endif
 
             return;
         }
@@ -372,9 +397,9 @@ void handleInflightCalibrationStickPosition(void)
     } else {
         AccInflightCalibrationArmed = !AccInflightCalibrationArmed;
         if (AccInflightCalibrationArmed) {
-            queueConfirmationBeep(4);
+            beeper(BEEPER_ACC_CALIBRATION);
         } else {
-            queueConfirmationBeep(6);
+            beeper(BEEPER_ACC_CALIBRATION_FAIL);
         }
     }
 }
@@ -397,7 +422,7 @@ void updateInflightCalibrationState(void)
 
 void updateMagHold(void)
 {
-    if (abs(rcCommand[YAW]) < 70 && FLIGHT_MODE(MAG_MODE)) {
+    if (ABS(rcCommand[YAW]) < 70 && FLIGHT_MODE(MAG_MODE)) {
         int16_t dif = heading - magHold;
         if (dif <= -180)
             dif += 360;
@@ -469,7 +494,7 @@ void executePeriodicTasks(void)
 #ifdef SONAR
     case UPDATE_SONAR_TASK:
         if (sensors(SENSOR_SONAR)) {
-            Sonar_update();
+            sonarUpdate();
         }
         break;
 #endif
@@ -489,6 +514,8 @@ void executePeriodicTasks(void)
 
 void processRx(void)
 {
+    static bool armedBeeperOn = false;
+
     calculateRxChannelsAndUpdateFailsafe(currentTime);
 
     // in 3D mode, we need to be able to disarm by switch at any time
@@ -501,32 +528,61 @@ void processRx(void)
 
     if (feature(FEATURE_FAILSAFE)) {
 
-        if (currentTime > FAILSAFE_POWER_ON_DELAY_US && !failsafe->vTable->isEnabled()) {
-            failsafe->vTable->enable();
+        if (currentTime > FAILSAFE_POWER_ON_DELAY_US && !failsafeIsMonitoring()) {
+            failsafeStartMonitoring();
         }
 
-        failsafe->vTable->updateState();
+        failsafeUpdateState();
     }
 
     throttleStatus_e throttleStatus = calculateThrottleStatus(&masterConfig.rxConfig, masterConfig.flight3DConfig.deadband3d_throttle);
 
     if (throttleStatus == THROTTLE_LOW) {
-        resetErrorAngle();
-        resetErrorGyro();
+        pidResetErrorAngle();
+        pidResetErrorGyro();
     }
-    // When armed and motors aren't spinning, disarm board after delay so users without buzzer won't lose fingers.
+
+    // When armed and motors aren't spinning, do beeps and then disarm
+    // board after delay so users without buzzer won't lose fingers.
     // mixTable constrains motor commands, so checking  throttleStatus is enough
-    if (
-        ARMING_FLAG(ARMED)
-        && feature(FEATURE_MOTOR_STOP) && !STATE(FIXED_WING)
-        && masterConfig.auto_disarm_delay != 0
-        && isUsingSticksForArming()
+    if (ARMING_FLAG(ARMED)
+        && feature(FEATURE_MOTOR_STOP)
+        && !STATE(FIXED_WING)
     ) {
-        if (throttleStatus == THROTTLE_LOW) {
-            if ((int32_t)(disarmAt - millis()) < 0)  // delay is over
-                mwDisarm();
+        if (isUsingSticksForArming()) {
+            if (throttleStatus == THROTTLE_LOW) {
+                if (masterConfig.auto_disarm_delay != 0
+                    && (int32_t)(disarmAt - millis()) < 0
+                ) {
+                    // auto-disarm configured and delay is over
+                    mwDisarm();
+                    armedBeeperOn = false;
+                } else {
+                    // still armed; do warning beeps while armed
+                    beeper(BEEPER_ARMED);
+                    armedBeeperOn = true;
+                }
+            } else {
+                // throttle is not low
+                if (masterConfig.auto_disarm_delay != 0) {
+                    // extend disarm time
+                    disarmAt = millis() + masterConfig.auto_disarm_delay * 1000;
+                }
+
+                if (armedBeeperOn) {
+                    beeperSilence();
+                    armedBeeperOn = false;
+                }
+            }
         } else {
-            disarmAt = millis() + masterConfig.auto_disarm_delay * 1000;   // extend delay
+            // arming is via AUX switch; beep while throttle low
+            if (throttleStatus == THROTTLE_LOW) {
+                beeper(BEEPER_ARMED);
+                armedBeeperOn = true;
+            } else if (armedBeeperOn) {
+                beeperSilence();
+                armedBeeperOn = false;
+            }
         }
     }
 
@@ -545,12 +601,12 @@ void processRx(void)
 
     bool canUseHorizonMode = true;
 
-    if ((IS_RC_MODE_ACTIVE(BOXANGLE) || (feature(FEATURE_FAILSAFE) && failsafe->vTable->hasTimerElapsed())) && (sensors(SENSOR_ACC))) {
+    if ((IS_RC_MODE_ACTIVE(BOXANGLE) || (feature(FEATURE_FAILSAFE) && failsafeIsActive())) && (sensors(SENSOR_ACC))) {
         // bumpless transfer to Level mode
     	canUseHorizonMode = false;
 
         if (!FLIGHT_MODE(ANGLE_MODE)) {
-            resetErrorAngle();
+            pidResetErrorAngle();
             ENABLE_FLIGHT_MODE(ANGLE_MODE);
         }
     } else {
@@ -562,7 +618,7 @@ void processRx(void)
         DISABLE_FLIGHT_MODE(ANGLE_MODE);
 
         if (!FLIGHT_MODE(HORIZON_MODE)) {
-            resetErrorAngle();
+            pidResetErrorAngle();
             ENABLE_FLIGHT_MODE(HORIZON_MODE);
         }
     } else {
@@ -622,7 +678,7 @@ void loop(void)
     static bool haveProcessedAnnexCodeOnce = false;
 #endif
 
-    updateRx();
+    updateRx(currentTime);
 
     if (shouldProcessRx(currentTime)) {
         processRx();
@@ -663,7 +719,7 @@ void loop(void)
     if (masterConfig.looptime == 0 || (int32_t)(currentTime - loopTime) >= 0) {
         loopTime = currentTime + masterConfig.looptime;
 
-        computeIMU(&currentProfile->accelerometerTrims, masterConfig.mixerMode);
+        imuUpdate(&currentProfile->accelerometerTrims, masterConfig.mixerMode);
 
         // Measure loop rate just after reading the sensors
         currentTime = micros();
@@ -693,6 +749,19 @@ void loop(void)
         }
 #endif
 
+        // If we're armed, at minimum throttle, and we do arming via the
+        // sticks, do not process yaw input from the rx.  We do this so the
+        // motors do not spin up while we are trying to arm or disarm.
+        // Allow yaw control for tricopters if the user wants the servo to move even when unarmed.
+        if (isUsingSticksForArming() && rcData[THROTTLE] <= masterConfig.rxConfig.mincheck
+#ifndef USE_QUAD_MIXER_ONLY
+                && !(masterConfig.mixerMode == MIXER_TRI && masterConfig.mixerConfig.tri_unarmed_servo)
+#endif
+        ) {
+            rcCommand[YAW] = 0;
+        }
+
+
         if (currentProfile->throttle_correction_value && (FLIGHT_MODE(ANGLE_MODE) || FLIGHT_MODE(HORIZON_MODE))) {
             rcCommand[THROTTLE] += calculateThrottleAngleCorrection(currentProfile->throttle_correction_value);
         }
@@ -715,7 +784,12 @@ void loop(void)
         );
 
         mixTable();
+
+#ifdef USE_SERVOS
+        filterServos();
         writeServos();
+#endif
+
         writeMotors();
 
 #ifdef BLACKBOX
@@ -727,7 +801,7 @@ void loop(void)
 
 #ifdef TELEMETRY
     if (!cliMode && feature(FEATURE_TELEMETRY)) {
-        handleTelemetry();
+        handleTelemetry(&masterConfig.rxConfig, masterConfig.flight3DConfig.deadband3d_throttle);
     }
 #endif
 

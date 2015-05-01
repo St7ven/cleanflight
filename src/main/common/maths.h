@@ -26,9 +26,9 @@
 
 #define RAD    (M_PIf / 180.0f)
 
-#define min(a, b) ((a) < (b) ? (a) : (b))
-#define max(a, b) ((a) > (b) ? (a) : (b))
-#define abs(x) ((x) > 0 ? (x) : -(x))
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+#define ABS(x) ((x) > 0 ? (x) : -(x))
 
 typedef struct stdev_t
 {
@@ -77,3 +77,8 @@ int scaleRange(int x, int srcMin, int srcMax, int destMin, int destMax);
 void normalizeV(struct fp_vector *src, struct fp_vector *dest);
 
 void rotateV(struct fp_vector *v, fp_angles_t *delta);
+
+int32_t quickMedianFilter3(int32_t * v);
+int32_t quickMedianFilter5(int32_t * v);
+int32_t quickMedianFilter7(int32_t * v);
+int32_t quickMedianFilter9(int32_t * v);

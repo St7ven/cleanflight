@@ -35,9 +35,17 @@
 
 #define USABLE_TIMER_CHANNEL_COUNT 18
 
+#define USE_SPI
+#define USE_SPI_DEVICE_1
+
 #define GYRO
 #define USE_GYRO_L3GD20
 #define USE_GYRO_MPU6050
+
+#define L3GD20_SPI                      SPI1
+#define L3GD20_CS_GPIO_CLK_PERIPHERAL   RCC_AHBPeriph_GPIOE
+#define L3GD20_CS_GPIO                  GPIOE
+#define L3GD20_CS_PIN                   GPIO_Pin_3
 
 #define GYRO_L3GD20_ALIGN CW90_DEG
 #define GYRO_MPU6050_ALIGN CW0_DEG
@@ -70,7 +78,25 @@
 
 #define USE_ADC
 
-#define SENSORS_SET (SENSOR_ACC | SENSOR_BARO | SENSOR_MAG)
+#define ADC_INSTANCE                ADC1
+#define ADC_AHB_PERIPHERAL          RCC_AHBPeriph_DMA1
+#define ADC_DMA_CHANNEL             DMA1_Channel1
+
+#define VBAT_ADC_GPIO               GPIOC
+#define VBAT_ADC_GPIO_PIN           GPIO_Pin_0
+#define VBAT_ADC_CHANNEL            ADC_Channel_6
+
+#define CURRENT_METER_ADC_GPIO      GPIOC
+#define CURRENT_METER_ADC_GPIO_PIN  GPIO_Pin_1
+#define CURRENT_METER_ADC_CHANNEL   ADC_Channel_7
+
+#define RSSI_ADC_GPIO               GPIOC
+#define RSSI_ADC_GPIO_PIN           GPIO_Pin_2
+#define RSSI_ADC_CHANNEL            ADC_Channel_8
+
+#define EXTERNAL1_ADC_GPIO          GPIOC
+#define EXTERNAL1_ADC_GPIO_PIN      GPIO_Pin_3
+#define EXTERNAL1_ADC_CHANNEL       ADC_Channel_9
 
 #define GPS
 #define LED_STRIP
@@ -96,3 +122,4 @@
 #define TELEMETRY
 #define SERIAL_RX
 #define AUTOTUNE
+#define USE_SERVOS

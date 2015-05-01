@@ -29,16 +29,32 @@ DEBUG ?=
 # Serial port/Device for flashing
 SERIAL_DEVICE	?= /dev/ttyUSB0
 
+# Flash size (KB).  Some low-end chips actually have more flash than advertised, use this to override.
+FLASH_SIZE ?=
+
 ###############################################################################
 # Things that need to be maintained as the source changes
 #
 
 FORKNAME			 = cleanflight
 
-VALID_TARGETS	 = NAZE NAZE32PRO OLIMEXINO STM32F3DISCOVERY CHEBUZZF3 CC3D CJMCU EUSTM32F103RC SPRACINGF3 PORT103R SPARKY ALIENWIIF1
+VALID_TARGETS	 = NAZE NAZE32PRO OLIMEXINO STM32F3DISCOVERY CHEBUZZF3 CC3D CJMCU EUSTM32F103RC SPRACINGF3 PORT103R SPARKY ALIENWIIF1 ALIENWIIF3
 
 # Valid targets for OP BootLoader support
 OPBL_VALID_TARGETS = CC3D
+
+# Configure default flash sizes for the targets
+ifeq ($(FLASH_SIZE),)
+ifeq ($(TARGET),$(filter $(TARGET),CJMCU))
+FLASH_SIZE = 64
+else ifeq ($(TARGET),$(filter $(TARGET),NAZE CC3D ALIENWIIF1 SPRACINGF3 OLIMEXINO))
+FLASH_SIZE = 128
+else ifeq ($(TARGET),$(filter $(TARGET),EUSTM32F103RC PORT103R STM32F3DISCOVERY CHEBUZZF3 NAZE32PRO SPARKY ALIENWIIF3))
+FLASH_SIZE = 256
+else
+$(error FLASH_SIZE not configured for target)
+endif
+endif
 
 REVISION = $(shell git log -1 --format="%h")
 
@@ -53,13 +69,13 @@ LINKER_DIR	 = $(ROOT)/src/main/target
 
 # Search path for sources
 VPATH		:= $(SRC_DIR):$(SRC_DIR)/startup
+USBFS_DIR	= $(ROOT)/lib/main/STM32_USB-FS-Device_Driver
+USBPERIPH_SRC = $(notdir $(wildcard $(USBFS_DIR)/src/*.c))
 
-ifeq ($(TARGET),$(filter $(TARGET),STM32F3DISCOVERY CHEBUZZF3 NAZE32PRO SPRACINGF3 SPARKY))
+ifeq ($(TARGET),$(filter $(TARGET),STM32F3DISCOVERY CHEBUZZF3 NAZE32PRO SPRACINGF3 SPARKY ALIENWIIF3))
 
 STDPERIPH_DIR	= $(ROOT)/lib/main/STM32F30x_StdPeriph_Driver
-USBFS_DIR	= $(ROOT)/lib/main/STM32_USB-FS-Device_Driver
 
-USBPERIPH_SRC = $(notdir $(wildcard $(USBFS_DIR)/src/*.c))
 STDPERIPH_SRC = $(notdir $(wildcard $(STDPERIPH_DIR)/src/*.c))
 
 EXCLUDES	= stm32f30x_crc.c \
@@ -92,7 +108,7 @@ DEVICE_STDPERIPH_SRC := $(DEVICE_STDPERIPH_SRC)\
 
 endif
 
-LD_SCRIPT	 = $(LINKER_DIR)/stm32_flash_f303_256k.ld
+LD_SCRIPT	 = $(LINKER_DIR)/stm32_flash_f303_$(FLASH_SIZE)k.ld
 
 ARCH_FLAGS	 = -mthumb -mcpu=cortex-m4 -mfloat-abi=hard -mfpu=fpv4-sp-d16 -mfpu=fpv4-sp-d16 -fsingle-precision-constant -Wdouble-promotion
 DEVICE_FLAGS = -DSTM32F303xC -DSTM32F303
@@ -125,7 +141,7 @@ INCLUDE_DIRS := $(INCLUDE_DIRS) \
 		   $(CMSIS_DIR)/CM3/CoreSupport \
 		   $(CMSIS_DIR)/CM3/DeviceSupport/ST/STM32F10x \
 
-LD_SCRIPT	 = $(LINKER_DIR)/stm32_flash_f103_256k.ld
+LD_SCRIPT	 = $(LINKER_DIR)/stm32_flash_f103_$(FLASH_SIZE)k.ld
 
 ARCH_FLAGS	 = -mthumb -mcpu=cortex-m3
 TARGET_FLAGS = -D$(TARGET) -pedantic
@@ -155,14 +171,30 @@ INCLUDE_DIRS := $(INCLUDE_DIRS) \
 		   $(CMSIS_DIR)/CM3/CoreSupport \
 		   $(CMSIS_DIR)/CM3/DeviceSupport/ST/STM32F10x \
 
-LD_SCRIPT	 = $(LINKER_DIR)/stm32_flash_f103_128k.ld
+DEVICE_STDPERIPH_SRC = $(STDPERIPH_SRC)
+
+ifeq ($(TARGET),CC3D)
+INCLUDE_DIRS := $(INCLUDE_DIRS) \
+		   $(USBFS_DIR)/inc \
+		   $(ROOT)/src/main/vcp
+
+VPATH := $(VPATH):$(USBFS_DIR)/src
+
+DEVICE_STDPERIPH_SRC := $(DEVICE_STDPERIPH_SRC) \
+		   $(USBPERIPH_SRC) 
+
+endif
+
+LD_SCRIPT	 = $(LINKER_DIR)/stm32_flash_f103_$(FLASH_SIZE)k.ld
 
 ARCH_FLAGS	 = -mthumb -mcpu=cortex-m3
 TARGET_FLAGS = -D$(TARGET) -pedantic
 DEVICE_FLAGS = -DSTM32F10X_MD -DSTM32F10X
 
-DEVICE_STDPERIPH_SRC = $(STDPERIPH_SRC)
+endif
 
+ifneq ($(FLASH_SIZE),)
+DEVICE_FLAGS := $(DEVICE_FLAGS) -DFLASH_SIZE=$(FLASH_SIZE)
 endif
 
 TARGET_DIR = $(ROOT)/src/main/target/$(TARGET)
@@ -180,6 +212,7 @@ INCLUDE_DIRS := $(INCLUDE_DIRS) \
 VPATH		:= $(VPATH):$(TARGET_DIR)
 
 COMMON_SRC	 = build_config.c \
+		   debug.c \
 		   version.c \
 		   $(TARGET_SRC) \
 		   config/config.c \
@@ -187,13 +220,15 @@ COMMON_SRC	 = build_config.c \
 		   common/maths.c \
 		   common/printf.c \
 		   common/typeconversion.c \
+		   common/encoding.c \
 		   main.c \
 		   mw.c \
 		   flight/altitudehold.c \
 		   flight/failsafe.c \
-		   flight/flight.c \
+		   flight/pid.c \
 		   flight/imu.c \
 		   flight/mixer.c \
+		   flight/lowpass.c \
 		   drivers/bus_i2c_soft.c \
 		   drivers/serial.c \
 		   drivers/sound_beeper.c \
@@ -233,10 +268,21 @@ HIGHEND_SRC  = flight/autotune.c \
 		   telemetry/frsky.c \
 		   telemetry/hott.c \
 		   telemetry/msp.c \
-           telemetry/smartport.c \
+		   telemetry/smartport.c \
 		   sensors/sonar.c \
 		   sensors/barometer.c \
-		   blackbox/blackbox.c
+		   blackbox/blackbox.c \
+		   blackbox/blackbox_io.c
+
+VCP_SRC	 = \
+		   vcp/hw_config.c \
+		   vcp/stm32_it.c \
+		   vcp/usb_desc.c \
+		   vcp/usb_endp.c \
+		   vcp/usb_istr.c \
+		   vcp/usb_prop.c \
+		   vcp/usb_pwr.c \
+		   drivers/serial_usb_vcp.c
 
 NAZE_SRC	 = startup_stm32f10x_md_gcc.S \
 		   drivers/accgyro_adxl345.c \
@@ -270,11 +316,13 @@ NAZE_SRC	 = startup_stm32f10x_md_gcc.S \
 		   drivers/system_stm32f10x.c \
 		   drivers/timer.c \
 		   drivers/timer_stm32f10x.c \
+		   drivers/flash_m25p16.c \
+		   io/flashfs.c \
 		   hardware_revision.c \
 		   $(HIGHEND_SRC) \
 		   $(COMMON_SRC)
 
-ALIENWIIF1_SRC	= $(NAZE_SRC)
+ALIENWIIF1_SRC	 = $(NAZE_SRC)
 
 EUSTM32F103RC_SRC	 = startup_stm32f10x_hd_gcc.S \
 		   drivers/accgyro_adxl345.c \
@@ -341,13 +389,10 @@ OLIMEXINO_SRC	 = startup_stm32f10x_md_gcc.S \
 		   $(HIGHEND_SRC) \
 		   $(COMMON_SRC)
 
-ifeq ($(TARGET),CJMCU)
-LD_SCRIPT	 = $(LINKER_DIR)/stm32_flash_f103_64k.ld
-endif
-
 ifeq ($(OPBL),yes)
 ifneq ($(filter $(TARGET),$(OPBL_VALID_TARGETS)),)
-LD_SCRIPT	 = $(LINKER_DIR)/stm32_flash_f103_128k_opbl.ld
+TARGET_FLAGS := -DOPBL $(TARGET_FLAGS)
+LD_SCRIPT	 = $(LINKER_DIR)/stm32_flash_f103_$(FLASH_SIZE)k_opbl.ld
 .DEFAULT_GOAL := binary
 else
 $(error OPBL specified with a unsupported target)
@@ -372,8 +417,9 @@ CJMCU_SRC	 = \
 		   drivers/system_stm32f10x.c \
 		   drivers/timer.c \
 		   drivers/timer_stm32f10x.c \
-		   blackbox/blackbox.c \
 		   hardware_revision.c \
+		   blackbox/blackbox.c \
+		   blackbox/blackbox_io.c \
 		   $(COMMON_SRC)
 
 CC3D_SRC	 = \
@@ -402,8 +448,11 @@ CC3D_SRC	 = \
 		   drivers/system_stm32f10x.c \
 		   drivers/timer.c \
 		   drivers/timer_stm32f10x.c \
+		   drivers/flash_m25p16.c \
+		   io/flashfs.c \
 		   $(HIGHEND_SRC) \
-		   $(COMMON_SRC)
+		   $(COMMON_SRC) \
+		   $(VCP_SRC)
 
 STM32F30x_COMMON_SRC	 = \
 		   startup_stm32f30x_md_gcc.S \
@@ -424,16 +473,6 @@ STM32F30x_COMMON_SRC	 = \
 		   drivers/system_stm32f30x.c \
 		   drivers/timer.c \
 		   drivers/timer_stm32f30x.c
-
-VCP_SRC	 = \
-		   vcp/hw_config.c \
-		   vcp/stm32_it.c \
-		   vcp/usb_desc.c \
-		   vcp/usb_endp.c \
-		   vcp/usb_istr.c \
-		   vcp/usb_prop.c \
-		   vcp/usb_pwr.c \
-		   drivers/serial_usb_vcp.c
 
 NAZE32PRO_SRC	 = \
 		   $(STM32F30x_COMMON_SRC) \
@@ -478,17 +517,19 @@ SPARKY_SRC	 = \
 		   $(COMMON_SRC) \
 		   $(VCP_SRC)
 
+ALIENWIIF3_SRC	 = $(SPARKY_SRC)
+
 SPRACINGF3_SRC	 = \
 		   $(STM32F30x_COMMON_SRC) \
 		   drivers/accgyro_mpu6050.c \
 		   drivers/barometer_ms5611.c \
 		   drivers/compass_hmc5883l.c \
+		   drivers/display_ug2864hsweg01.h \
+		   drivers/flash_m25p16.c \
+		   drivers/sonar_hcsr04.c \
+		   io/flashfs.c \
 		   $(HIGHEND_SRC) \
 		   $(COMMON_SRC)
-
-ifeq ($(TARGET),SPRACINGF3)
-LD_SCRIPT	 = $(LINKER_DIR)/stm32_flash_f303_128k.ld
-endif
 
 # Search path and source files for the ST stdperiph library
 VPATH		:= $(VPATH):$(STDPERIPH_DIR)/src
@@ -532,12 +573,12 @@ CFLAGS		 = $(ARCH_FLAGS) \
 		   -D'__TARGET__="$(TARGET)"' \
 		   -D'__REVISION__="$(REVISION)"' \
 		   -save-temps=obj \
-		   -MMD
+		   -MMD -MP
 
 ASFLAGS		 = $(ARCH_FLAGS) \
 		   -x assembler-with-cpp \
 		   $(addprefix -I,$(INCLUDE_DIRS)) \
-		  -MMD
+		  -MMD -MP
 
 LDFLAGS		 = -lm \
 		   -nostartfiles \

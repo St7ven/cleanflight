@@ -113,9 +113,9 @@
 
 static float magGain[3] = { 1.0f, 1.0f, 1.0f };
 
-static hmc5883Config_t *hmc5883Config = NULL;
+static const hmc5883Config_t *hmc5883Config = NULL;
 
-bool hmc5883lDetect(mag_t* mag, hmc5883Config_t *hmc5883ConfigToUse)
+bool hmc5883lDetect(mag_t* mag, const hmc5883Config_t *hmc5883ConfigToUse)
 {
     bool ack = false;
     uint8_t sig = 0;
@@ -177,7 +177,7 @@ void hmc5883lInit(void)
         xyz_total[Z] += magADC[Z];
 
         // Detect saturation.
-        if (-4096 >= min(magADC[X], min(magADC[Y], magADC[Z]))) {
+        if (-4096 >= MIN(magADC[X], MIN(magADC[Y], magADC[Z]))) {
             bret = false;
             break;              // Breaks out of the for loop.  No sense in continuing if we saturated.
         }
@@ -197,7 +197,7 @@ void hmc5883lInit(void)
         xyz_total[Z] -= magADC[Z];
 
         // Detect saturation.
-        if (-4096 >= min(magADC[X], min(magADC[Y], magADC[Z]))) {
+        if (-4096 >= MIN(magADC[X], MIN(magADC[Y], magADC[Z]))) {
             bret = false;
             break;              // Breaks out of the for loop.  No sense in continuing if we saturated.
         }

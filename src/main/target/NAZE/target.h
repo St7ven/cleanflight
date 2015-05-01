@@ -20,13 +20,14 @@
 #define TARGET_BOARD_IDENTIFIER "AFNA" // AFroNAze - NAZE might be considered misleading on Naze clones like the flip32.
 #define USE_HARDWARE_REVISION_DETECTION
 
+#define BOARD_HAS_VOLTAGE_DIVIDER
+
 #define LED0_GPIO   GPIOB
 #define LED0_PIN    Pin_3 // PB3 (LED)
 #define LED0_PERIPHERAL RCC_APB2Periph_GPIOB
 #define LED1_GPIO   GPIOB
 #define LED1_PIN    Pin_4 // PB4 (LED)
 #define LED1_PERIPHERAL RCC_APB2Periph_GPIOB
-
 
 #define BEEP_GPIO   GPIOA
 #define BEEP_PIN    Pin_12 // PA12 (Beeper)
@@ -56,13 +57,27 @@
 #define NAZE_SPI_CS_GPIO      GPIOB
 #define NAZE_SPI_CS_PIN       GPIO_Pin_12
 
+// We either have this 16mbit flash chip on SPI or the MPU6500 acc/gyro depending on board revision:
+#define M25P16_CS_GPIO        NAZE_SPI_CS_GPIO
+#define M25P16_CS_PIN         NAZE_SPI_CS_PIN
+#define M25P16_SPI_INSTANCE   NAZE_SPI_INSTANCE
+
 #define MPU6500_CS_GPIO       NAZE_SPI_CS_GPIO
 #define MPU6500_CS_PIN        NAZE_SPI_CS_PIN
 #define MPU6500_SPI_INSTANCE  NAZE_SPI_INSTANCE
 
+#define USE_FLASHFS
+
+#define USE_FLASH_M25P16
+
+#define EXTI15_10_CALLBACK_HANDLER_COUNT 2 // MPU data ready and BMP085 EOC
+#define USE_MPU_DATA_READY_SIGNAL
+
 #define GYRO
 #define USE_GYRO_MPU3050
 #define USE_GYRO_MPU6050
+#define USE_GYRO_SPI_MPU6500
+
 
 #define GYRO_MPU3050_ALIGN CW0_DEG
 #define GYRO_MPU6050_ALIGN CW0_DEG
@@ -73,13 +88,13 @@
 #define USE_ACC_BMA280
 #define USE_ACC_MMA8452
 #define USE_ACC_MPU6050
-//#define ACC_SPI_MPU6500
+#define USE_ACC_SPI_MPU6500
 
 #define ACC_ADXL345_ALIGN CW270_DEG
 #define ACC_MPU6050_ALIGN CW0_DEG
 #define ACC_MMA8452_ALIGN CW90_DEG
 #define ACC_BMA280_ALIGN CW0_DEG
-//#define ACC_SPI_MPU6500_ALIGN CW0_DEG
+#define ACC_SPI_MPU6500_ALIGN CW0_DEG
 
 #define BARO
 #define USE_BARO_MS5611
@@ -135,8 +150,6 @@
 #define EXTERNAL1_ADC_GPIO_PIN      GPIO_Pin_5
 #define EXTERNAL1_ADC_CHANNEL       ADC_Channel_5
 
-#define SENSORS_SET (SENSOR_ACC | SENSOR_BARO | SENSOR_MAG)
-
 #define GPS
 
 #define LED_STRIP
@@ -146,16 +159,19 @@
 #define TELEMETRY
 #define SERIAL_RX
 #define AUTOTUNE
+#define USE_SERVOS
 
 #define SPEKTRUM_BIND
 // USART2, PA3
 #define BIND_PORT  GPIOA
 #define BIND_PIN   Pin_3
 
-// alternative defaults AlienWii32 (activate via OPTIONS="ALIENWII32" during make for NAZE target)
+// alternative defaults for AlienWii32 F1 target
 #ifdef ALIENWII32
-#define BRUSHED_MOTORS
+#undef TARGET_BOARD_IDENTIFIER
+#define TARGET_BOARD_IDENTIFIER "AWF1" // AlienWii32 F1.
 #define HARDWARE_BIND_PLUG
+
 // Hardware bind plug at PB5 (Pin 41)
 #define BINDPLUG_PORT  GPIOB
 #define BINDPLUG_PIN   Pin_5

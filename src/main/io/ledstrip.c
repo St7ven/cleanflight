@@ -28,29 +28,29 @@
 #ifdef LED_STRIP
 
 #include <common/color.h>
+#include <common/maths.h>
+#include <common/typeconversion.h>
 
 #include "drivers/light_ws2811strip.h"
 #include "drivers/system.h"
 #include "drivers/serial.h"
 
-#include <common/maths.h>
 #include <common/printf.h>
-#include <common/typeconversion.h>
 
 #include "sensors/battery.h"
 
-#include "config/runtime_config.h"
-#include "config/config.h"
-#include "rx/rx.h"
 #include "io/rc_controls.h"
+#include "io/ledstrip.h"
+
+#include "rx/rx.h"
+
 #include "flight/failsafe.h"
 
-#include "io/ledstrip.h"
+#include "config/runtime_config.h"
+#include "config/config.h"
 
 static bool ledStripInitialised = false;
 static bool ledStripEnabled = true;
-
-static failsafe_t* failsafe;
 
 static void ledStripDisable(void);
 
@@ -250,18 +250,44 @@ const ledConfig_t defaultLedStripConfig[] = {
 };
 #else
 const ledConfig_t defaultLedStripConfig[] = {
-    { CALCULATE_LED_XY( 2,  2), 0, LED_DIRECTION_SOUTH | LED_DIRECTION_EAST | LED_FUNCTION_INDICATOR | LED_FUNCTION_ARM_STATE },
-    { CALCULATE_LED_XY( 2,  1), 0, LED_DIRECTION_EAST | LED_FUNCTION_FLIGHT_MODE | LED_FUNCTION_WARNING },
-    { CALCULATE_LED_XY( 2,  0), 0, LED_DIRECTION_NORTH | LED_DIRECTION_EAST | LED_FUNCTION_INDICATOR | LED_FUNCTION_ARM_STATE },
-    { CALCULATE_LED_XY( 1,  0), 0, LED_DIRECTION_NORTH | LED_FUNCTION_FLIGHT_MODE },
+    { CALCULATE_LED_XY(15, 15), 0, LED_DIRECTION_SOUTH | LED_DIRECTION_EAST | LED_FUNCTION_INDICATOR | LED_FUNCTION_ARM_STATE },
+
+    { CALCULATE_LED_XY(15,  8), 0, LED_DIRECTION_EAST | LED_FUNCTION_FLIGHT_MODE | LED_FUNCTION_WARNING },
+    { CALCULATE_LED_XY(15,  7), 0, LED_DIRECTION_EAST | LED_FUNCTION_FLIGHT_MODE | LED_FUNCTION_WARNING },
+
+    { CALCULATE_LED_XY(15,  0), 0, LED_DIRECTION_NORTH | LED_DIRECTION_EAST | LED_FUNCTION_INDICATOR | LED_FUNCTION_ARM_STATE },
+
+    { CALCULATE_LED_XY( 8,  0), 0, LED_DIRECTION_NORTH | LED_FUNCTION_FLIGHT_MODE },
+    { CALCULATE_LED_XY( 7,  0), 0, LED_DIRECTION_NORTH | LED_FUNCTION_FLIGHT_MODE },
+
     { CALCULATE_LED_XY( 0,  0), 0, LED_DIRECTION_NORTH | LED_DIRECTION_WEST | LED_FUNCTION_INDICATOR | LED_FUNCTION_ARM_STATE },
-    { CALCULATE_LED_XY( 0,  1), 0, LED_DIRECTION_WEST | LED_FUNCTION_FLIGHT_MODE | LED_FUNCTION_WARNING },
-    { CALCULATE_LED_XY( 0,  2), 0, LED_DIRECTION_SOUTH | LED_DIRECTION_WEST | LED_FUNCTION_INDICATOR | LED_FUNCTION_ARM_STATE },
-    { CALCULATE_LED_XY( 1,  2), 0, LED_DIRECTION_SOUTH | LED_FUNCTION_FLIGHT_MODE | LED_FUNCTION_WARNING },
-    { CALCULATE_LED_XY( 1,  1), 0, LED_DIRECTION_UP | LED_FUNCTION_FLIGHT_MODE | LED_FUNCTION_WARNING },
-    { CALCULATE_LED_XY( 1,  1), 0, LED_DIRECTION_UP | LED_FUNCTION_FLIGHT_MODE | LED_FUNCTION_WARNING },
-    { CALCULATE_LED_XY( 1,  1), 0, LED_DIRECTION_DOWN | LED_FUNCTION_FLIGHT_MODE | LED_FUNCTION_WARNING },
-    { CALCULATE_LED_XY( 1,  1), 0, LED_DIRECTION_DOWN | LED_FUNCTION_FLIGHT_MODE | LED_FUNCTION_WARNING },
+
+    { CALCULATE_LED_XY( 0,  7), 0, LED_DIRECTION_WEST | LED_FUNCTION_FLIGHT_MODE | LED_FUNCTION_WARNING },
+    { CALCULATE_LED_XY( 0,  8), 0, LED_DIRECTION_WEST | LED_FUNCTION_FLIGHT_MODE | LED_FUNCTION_WARNING },
+
+    { CALCULATE_LED_XY( 0, 15), 0, LED_DIRECTION_SOUTH | LED_DIRECTION_WEST | LED_FUNCTION_INDICATOR | LED_FUNCTION_ARM_STATE },
+
+    { CALCULATE_LED_XY( 7, 15), 0, LED_DIRECTION_SOUTH | LED_FUNCTION_FLIGHT_MODE | LED_FUNCTION_WARNING },
+    { CALCULATE_LED_XY( 8, 15), 0, LED_DIRECTION_SOUTH | LED_FUNCTION_FLIGHT_MODE | LED_FUNCTION_WARNING },
+
+    { CALCULATE_LED_XY( 7,  7), 0, LED_DIRECTION_UP | LED_FUNCTION_FLIGHT_MODE | LED_FUNCTION_WARNING },
+    { CALCULATE_LED_XY( 8,  7), 0, LED_DIRECTION_UP | LED_FUNCTION_FLIGHT_MODE | LED_FUNCTION_WARNING },
+    { CALCULATE_LED_XY( 7,  8), 0, LED_DIRECTION_DOWN | LED_FUNCTION_FLIGHT_MODE | LED_FUNCTION_WARNING },
+    { CALCULATE_LED_XY( 8,  8), 0, LED_DIRECTION_DOWN | LED_FUNCTION_FLIGHT_MODE | LED_FUNCTION_WARNING },
+
+    { CALCULATE_LED_XY( 8,  9), 3, LED_FUNCTION_THRUST_RING},
+    { CALCULATE_LED_XY( 9, 10), 3, LED_FUNCTION_THRUST_RING},
+    { CALCULATE_LED_XY(10, 11), 3, LED_FUNCTION_THRUST_RING},
+    { CALCULATE_LED_XY(10, 12), 3, LED_FUNCTION_THRUST_RING},
+    { CALCULATE_LED_XY( 9, 13), 3, LED_FUNCTION_THRUST_RING},
+    { CALCULATE_LED_XY( 8, 14), 3, LED_FUNCTION_THRUST_RING},
+    { CALCULATE_LED_XY( 7, 14), 3, LED_FUNCTION_THRUST_RING},
+    { CALCULATE_LED_XY( 6, 13), 3, LED_FUNCTION_THRUST_RING},
+    { CALCULATE_LED_XY( 5, 12), 3, LED_FUNCTION_THRUST_RING},
+    { CALCULATE_LED_XY( 5, 11), 3, LED_FUNCTION_THRUST_RING},
+    { CALCULATE_LED_XY( 6, 10), 3, LED_FUNCTION_THRUST_RING},
+    { CALCULATE_LED_XY( 7,  9), 3, LED_FUNCTION_THRUST_RING},
+
 };
 #endif
 
@@ -300,7 +326,7 @@ static const uint8_t directionMappings[DIRECTION_COUNT] = {
     LED_DIRECTION_DOWN
 };
 
-static const char functionCodes[] = { 'I', 'W', 'F', 'A', 'T', 'R' };
+static const char functionCodes[] = { 'I', 'W', 'F', 'A', 'T', 'R', 'C' };
 #define FUNCTION_COUNT (sizeof(functionCodes) / sizeof(functionCodes[0]))
 static const uint16_t functionMappings[FUNCTION_COUNT] = {
     LED_FUNCTION_INDICATOR,
@@ -308,7 +334,8 @@ static const uint16_t functionMappings[FUNCTION_COUNT] = {
     LED_FUNCTION_FLIGHT_MODE,
     LED_FUNCTION_ARM_STATE,
     LED_FUNCTION_THROTTLE,
-	LED_FUNCTION_THRUST_RING
+	LED_FUNCTION_THRUST_RING,
+	LED_FUNCTION_COLOR
 };
 
 // grid offsets
@@ -576,7 +603,11 @@ void applyLedModeLayer(void)
         ledConfig = &ledConfigs[ledIndex];
 
         if (!(ledConfig->flags & LED_FUNCTION_THRUST_RING)) {
-            setLedHsv(ledIndex, &hsv_black);
+            if (ledConfig->flags & LED_FUNCTION_COLOR) {
+                setLedHsv(ledIndex, &colors[ledConfig->color]);
+            } else {
+                setLedHsv(ledIndex, &hsv_black);
+            }
         }
 
         if (!(ledConfig->flags & LED_FUNCTION_FLIGHT_MODE)) {
@@ -630,7 +661,7 @@ void applyLedWarningLayer(uint8_t updateNow)
         if (feature(FEATURE_VBAT) && calculateBatteryState() != BATTERY_OK) {
             warningFlags |= WARNING_FLAG_LOW_BATTERY;
         }
-        if (feature(FEATURE_FAILSAFE) && failsafe->vTable->hasTimerElapsed()) {
+        if (feature(FEATURE_FAILSAFE) && failsafeIsActive()) {
             warningFlags |= WARNING_FLAG_FAILSAFE;
         }
         if (!ARMING_FLAG(ARMED) && !ARMING_FLAG(OK_TO_ARM)) {
@@ -683,6 +714,9 @@ void applyLedIndicatorLayer(uint8_t indicatorFlashState)
     const ledConfig_t *ledConfig;
     static const hsvColor_t *flashColor;
 
+    if (!rxIsReceivingSignal()) {
+        return;
+    }
 
     if (indicatorFlashState == 0) {
         flashColor = &hsv_orange;
@@ -738,7 +772,7 @@ void applyLedThrottleLayer()
 
         int scaled = scaleRange(rcData[THROTTLE], PWM_RANGE_MIN, PWM_RANGE_MAX, -60, +60);
         scaled += HSV_HUE_MAX;
-        color.h = scaled % HSV_HUE_MAX;
+        color.h = (color.h + scaled) % HSV_HUE_MAX;
         setLedHsv(ledIndex, &color);
     }
 }
@@ -892,10 +926,10 @@ void updateLedStrip(void)
 
     if (indicatorFlashNow) {
 
-        uint8_t rollScale = abs(rcCommand[ROLL]) / 50;
-        uint8_t pitchScale = abs(rcCommand[PITCH]) / 50;
-        uint8_t scale = max(rollScale, pitchScale);
-        nextIndicatorFlashAt = now + (LED_STRIP_5HZ / max(1, scale));
+        uint8_t rollScale = ABS(rcCommand[ROLL]) / 50;
+        uint8_t pitchScale = ABS(rcCommand[PITCH]) / 50;
+        uint8_t scale = MAX(rollScale, pitchScale);
+        nextIndicatorFlashAt = now + (LED_STRIP_5HZ / MAX(1, scale));
 
         if (indicatorFlashState == 0) {
             indicatorFlashState = 1;
@@ -998,11 +1032,10 @@ void applyDefaultLedStripConfig(ledConfig_t *ledConfigs)
     reevalulateLedConfig();
 }
 
-void ledStripInit(ledConfig_t *ledConfigsToUse, hsvColor_t *colorsToUse, failsafe_t* failsafeToUse)
+void ledStripInit(ledConfig_t *ledConfigsToUse, hsvColor_t *colorsToUse)
 {
     ledConfigs = ledConfigsToUse;
     colors = colorsToUse;
-    failsafe = failsafeToUse;
     ledStripInitialised = false;
 }
 

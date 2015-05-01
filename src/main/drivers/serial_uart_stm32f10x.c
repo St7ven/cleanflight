@@ -34,6 +34,7 @@
 
 #include "serial.h"
 #include "serial_uart.h"
+#include "serial_uart_impl.h"
 
 #ifdef USE_USART1
 static uartPort_t uartPort1;
@@ -47,13 +48,18 @@ static uartPort_t uartPort2;
 static uartPort_t uartPort3;
 #endif
 
-void uartStartTxDMA(uartPort_t *s);
+// Using RX DMA disables the use of receive callbacks
+#define USE_USART1_RX_DMA
+
+#if defined(CC3D) // FIXME move board specific code to target.h files.
+#undef USE_USART1_RX_DMA
+#endif
 
 void usartIrqCallback(uartPort_t *s)
 {
     uint16_t SR = s->USARTx->SR;
 
-    if (SR & USART_FLAG_RXNE) {
+    if (SR & USART_FLAG_RXNE && !s->rxDMAChannel) {
         // If we registered a callback, pass crap there
         if (s->port.callback) {
             s->port.callback(s->USARTx->DR);
@@ -78,7 +84,7 @@ void usartIrqCallback(uartPort_t *s)
 
 #ifdef USE_USART1
 // USART1 - Telemetry (RX/TX by DMA)
-uartPort_t *serialUSART1(uint32_t baudRate, portMode_t mode)
+uartPort_t *serialUSART1(uint32_t baudRate, portMode_t mode, portOptions_t options)
 {
     uartPort_t *s;
     static volatile uint8_t rx1Buffer[UART1_RX_BUFFER_SIZE];
@@ -98,11 +104,13 @@ uartPort_t *serialUSART1(uint32_t baudRate, portMode_t mode)
     
     s->USARTx = USART1;
 
-    s->txDMAPeripheralBaseAddr = (uint32_t)&s->USARTx->DR;
-    s->rxDMAPeripheralBaseAddr = (uint32_t)&s->USARTx->DR;
 
+#ifdef USE_USART1_RX_DMA
     s->rxDMAChannel = DMA1_Channel5;
+    s->rxDMAPeripheralBaseAddr = (uint32_t)&s->USARTx->DR;
+#endif
     s->txDMAChannel = DMA1_Channel4;
+    s->txDMAPeripheralBaseAddr = (uint32_t)&s->USARTx->DR;
 
     RCC_APB2PeriphClockCmd(RCC_APB2Periph_USART1, ENABLE);
     RCC_AHBPeriphClockCmd(RCC_AHBPeriph_DMA1, ENABLE);
@@ -110,17 +118,23 @@ uartPort_t *serialUSART1(uint32_t baudRate, portMode_t mode)
     // USART1_TX    PA9
     // USART1_RX    PA10
     gpio.speed = Speed_2MHz;
+
     gpio.pin = Pin_9;
-    gpio.mode = Mode_AF_PP;
-    if (mode & MODE_TX)
+    if (options & SERIAL_BIDIR) {
+        gpio.mode = Mode_AF_OD;
         gpioInit(GPIOA, &gpio);
-    gpio.mode = Mode_AF_OD;
-    if (mode & MODE_BIDIR)
-        gpioInit(GPIOA, &gpio);
-    gpio.pin = Pin_10;
-    gpio.mode = Mode_IPU;
-    if (mode & MODE_RX)
-        gpioInit(GPIOA, &gpio);
+    } else {
+        if (mode & MODE_TX) {
+            gpio.mode = Mode_AF_PP;
+            gpioInit(GPIOA, &gpio);
+        }
+
+        if (mode & MODE_RX) {
+            gpio.pin = Pin_10;
+            gpio.mode = Mode_IPU;
+            gpioInit(GPIOA, &gpio);
+        }
+    }
 
     // DMA TX Interrupt
     NVIC_InitStructure.NVIC_IRQChannel = DMA1_Channel4_IRQn;
@@ -128,6 +142,15 @@ uartPort_t *serialUSART1(uint32_t baudRate, portMode_t mode)
     NVIC_InitStructure.NVIC_IRQChannelSubPriority = NVIC_PRIORITY_SUB(NVIC_PRIO_SERIALUART1_TXDMA);
     NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
     NVIC_Init(&NVIC_InitStructure);
+
+#ifndef USE_USART1_RX_DMA
+    // RX/TX Interrupt
+    NVIC_InitStructure.NVIC_IRQChannel = USART1_IRQn;
+    NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = NVIC_PRIORITY_BASE(NVIC_PRIO_SERIALUART1);
+    NVIC_InitStructure.NVIC_IRQChannelSubPriority = NVIC_PRIORITY_SUB(NVIC_PRIO_SERIALUART1);
+    NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
+    NVIC_Init(&NVIC_InitStructure);
+#endif
 
     return s;
 }
@@ -146,27 +169,18 @@ void DMA1_Channel4_IRQHandler(void)
         s->txDMAEmpty = true;
 }
 
-// USART1 Tx IRQ Handler
+// USART1 Rx/Tx IRQ Handler
 void USART1_IRQHandler(void)
 {
     uartPort_t *s = &uartPort1;
-    uint16_t SR = s->USARTx->SR;
-
-    if (SR & USART_FLAG_TXE) {
-        if (s->port.txBufferTail != s->port.txBufferHead) {
-            s->USARTx->DR = s->port.txBuffer[s->port.txBufferTail];
-            s->port.txBufferTail = (s->port.txBufferTail + 1) % s->port.txBufferSize;
-        } else {
-            USART_ITConfig(s->USARTx, USART_IT_TXE, DISABLE);
-        }
-    }
+    usartIrqCallback(s);
 }
 
 #endif
 
 #ifdef USE_USART2
 // USART2 - GPS or Spektrum or ?? (RX + TX by IRQ)
-uartPort_t *serialUSART2(uint32_t baudRate, portMode_t mode)
+uartPort_t *serialUSART2(uint32_t baudRate, portMode_t mode, portOptions_t options)
 {
     uartPort_t *s;
     static volatile uint8_t rx2Buffer[UART2_RX_BUFFER_SIZE];
@@ -195,17 +209,23 @@ uartPort_t *serialUSART2(uint32_t baudRate, portMode_t mode)
     // USART2_TX    PA2
     // USART2_RX    PA3
     gpio.speed = Speed_2MHz;
+
     gpio.pin = Pin_2;
-    gpio.mode = Mode_AF_PP;
-    if (mode & MODE_TX)
+    if (options & SERIAL_BIDIR) {
+        gpio.mode = Mode_AF_OD;
         gpioInit(GPIOA, &gpio);
-    gpio.mode = Mode_AF_OD;
-    if (mode & MODE_BIDIR)
-        gpioInit(GPIOA, &gpio);
-    gpio.pin = Pin_3;
-    gpio.mode = Mode_IPU;
-    if (mode & MODE_RX)
-        gpioInit(GPIOA, &gpio);
+    } else {
+        if (mode & MODE_TX) {
+            gpio.mode = Mode_AF_PP;
+            gpioInit(GPIOA, &gpio);
+        }
+
+        if (mode & MODE_RX) {
+            gpio.pin = Pin_3;
+            gpio.mode = Mode_IPU;
+            gpioInit(GPIOA, &gpio);
+        }
+    }
 
     // RX/TX Interrupt
     NVIC_InitStructure.NVIC_IRQChannel = USART2_IRQn;
@@ -229,7 +249,7 @@ void USART2_IRQHandler(void)
 
 #ifdef USE_USART3
 // USART3
-uartPort_t *serialUSART3(uint32_t baudRate, portMode_t mode)
+uartPort_t *serialUSART3(uint32_t baudRate, portMode_t mode, portOptions_t options)
 {
     uartPort_t *s;
     static volatile uint8_t rx3Buffer[UART3_RX_BUFFER_SIZE];
@@ -260,17 +280,23 @@ uartPort_t *serialUSART3(uint32_t baudRate, portMode_t mode)
 #endif
 
     gpio.speed = Speed_2MHz;
+
     gpio.pin = USART3_TX_PIN;
-    gpio.mode = Mode_AF_PP;
-    if (mode & MODE_TX)
+    if (options & SERIAL_BIDIR) {
+        gpio.mode = Mode_AF_OD;
         gpioInit(USART3_GPIO, &gpio);
-    gpio.mode = Mode_AF_OD;
-    if (mode & MODE_BIDIR)
-        gpioInit(USART3_GPIO, &gpio);
-    gpio.pin = USART3_RX_PIN;
-    gpio.mode = Mode_IPU;
-    if (mode & MODE_RX)
-        gpioInit(USART3_GPIO, &gpio);
+    } else {
+        if (mode & MODE_TX) {
+            gpio.mode = Mode_AF_PP;
+            gpioInit(USART3_GPIO, &gpio);
+        }
+
+        if (mode & MODE_RX) {
+            gpio.pin = USART3_RX_PIN;
+            gpio.mode = Mode_IPU;
+            gpioInit(USART3_GPIO, &gpio);
+        }
+    }
 
     // RX/TX Interrupt
     NVIC_InitStructure.NVIC_IRQChannel = USART3_IRQn;

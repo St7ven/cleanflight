@@ -23,8 +23,10 @@
 #define BARO
 
 extern "C" {
+    #include "debug.h"
+
     #include "common/axis.h"
-    #include "flight/flight.h"
+    #include "common/maths.h"
 
     #include "sensors/sensors.h"
     #include "drivers/sensor.h"
@@ -37,7 +39,10 @@ extern "C" {
 
     #include "config/runtime_config.h"
 
+    #include "rx/rx.h"
+
     #include "flight/mixer.h"
+    #include "flight/pid.h"
     #include "flight/imu.h"
 }
 
@@ -48,10 +53,23 @@ extern "C" {
 #define UPWARDS_THRUST false
 
 
-TEST(FlightImuTest, Placeholder)
+TEST(FlightImuTest, TestCalculateHeading)
 {
-    // TODO test things
-    EXPECT_EQ(true, true);
+    //TODO: Add test cases using the Z dimension.
+    t_fp_vector north = {.A={1.0f, 0.0f, 0.0f}};
+    EXPECT_EQ(imuCalculateHeading(&north), 0);
+
+    t_fp_vector east = {.A={0.0f, 1.0f, 0.0f}};
+    EXPECT_EQ(imuCalculateHeading(&east), 90);
+
+    t_fp_vector south = {.A={-1.0f, 0.0f, 0.0f}};
+    EXPECT_EQ(imuCalculateHeading(&south), 180);
+
+    t_fp_vector west = {.A={0.0f, -1.0f, 0.0f}};
+    EXPECT_EQ(imuCalculateHeading(&west), 270);
+
+    t_fp_vector north_east = {.A={1.0f, 1.0f, 0.0f}};
+    EXPECT_EQ(imuCalculateHeading(&north_east), 45);
 }
 
 // STUBS
@@ -59,22 +77,35 @@ TEST(FlightImuTest, Placeholder)
 extern "C" {
 uint32_t rcModeActivationMask;
 int16_t rcCommand[4];
+int16_t rcData[MAX_SUPPORTED_RC_CHANNEL_COUNT];
 
 uint16_t acc_1G;
 int16_t heading;
 gyro_t gyro;
 int16_t magADC[XYZ_AXIS_COUNT];
 int32_t BaroAlt;
-int16_t debug[4];
+int16_t debug[DEBUG16_VALUE_COUNT];
 
 uint8_t stateFlags;
 uint16_t flightModeFlags;
 uint8_t armingFlags;
 
 int32_t sonarAlt;
+int16_t accADC[XYZ_AXIS_COUNT];
+int16_t gyroADC[XYZ_AXIS_COUNT];
 
 
-void gyroGetADC(void) {};
+uint16_t enableFlightMode(flightModeFlags_e mask)
+{
+    return flightModeFlags |= (mask);
+}
+
+uint16_t disableFlightMode(flightModeFlags_e mask)
+{
+    return flightModeFlags &= ~(mask);
+}
+
+void gyroUpdate(void) {};
 bool sensors(uint32_t mask)
 {
     UNUSED(mask);

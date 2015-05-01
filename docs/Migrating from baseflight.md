@@ -31,14 +31,11 @@ verify your aux config is correct - aux settings are not backwards compatible.
 In general all CLI commands use underscore characters to separate words for consistency.  In baseflight the format of CLI commands is somewhat haphazard.
 
 ### gps_baudrate
-reason: simplify
-
-Cleanflight uses normal baud rate values for gps baudrate, baseflight uses an index.
+reason: unified baud rate configuration
 
 If an unsupported baud rate value is used the gps code will select 115200 baud.
 
-example: `set gps_baudrate = 115200`
-
+see `serial_port_x_gps_baudrate`
 
 ### gps_type
 reason: renamed to `gps_provider` for consistency
@@ -47,18 +44,18 @@ reason: renamed to `gps_provider` for consistency
 reason: renamed to `serialrx_provider` for consistency
 
 ### rssi_aux_channel
-reason: improved functionality
+reason: renamed to `rssi_channel` for improved functionality
 
 Cleanflight supports using any RX channel for rssi.  Baseflight only supports AUX1 to 4.
 
 In Cleanflight a value of 0 disables the feature, a higher value indicates the channel number to read RSSI information from.
 
-Example: to use RSSI on AUX1 in Cleanflight use `set rssi_aux_channel = 5`, since 5 is the first AUX channel.
+Example: to use RSSI on AUX1 in Cleanflight use `set rssi_channel = 5`, since 5 is the first AUX channel (this is equivalent to `set rssi_aux_channel = 1` in Baseflight).
 
 ### failsafe_detect_threshold
 reason: improved functionality
 
-See `failsafe_min_usec` and `failsafe_max_usec` in Failsafe documentation.
+See `rx_min_usec` and `rx_max_usec` in Failsafe documentation.
 
 ### emfavoidance
 reason: renamed to `emf_avoidance` for consistency
